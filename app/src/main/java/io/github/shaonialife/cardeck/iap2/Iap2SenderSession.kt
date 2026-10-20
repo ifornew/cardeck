@@ -87,6 +87,9 @@ class Iap2SenderSession(
     private val maxPendingFrames = 256
     private var pendingOverflowLogged = false
 
+    /** 车机反向请求设备识别（0x1D00）是否已应答——每会话只答一次。 */
+    private var deviceIdentificationAnswered = false
+
     private val random = SecureRandom()
 
     /** 0x5703 解析结果（保活期间车机重发 0x5702 时需重新应答）。 */
@@ -121,6 +124,13 @@ class Iap2SenderSession(
     private companion object {
         /** 等 StartHID 的窗口：xcertplay 会发（订阅后立即到），DiPlay 不发。 */
         const val HID_WAIT_NANOS = 2_000_000_000L
+
+        /**
+         * 设备侧自报身份（对照 catplay 的 iPhone persona：`_device-info` model=D84AP）。
+         * 车机（BMW 尤其严格）用这些字段 + 收/发消息清单判定「这台设备支持 CarPlay」。
+         */
+        const val DEVICE_MODEL_IDENTIFIER = "D84AP"
+        const val DEVICE_FIRMWARE_VERSION = "17.6.1"
 
         /**
          * 等 0x4301 的短窗口（声明会发的测试台毫秒级应答；没声明的车机直接跳过）。
@@ -397,6 +407,12 @@ class Iap2SenderSession(
             if (frame.messageId == Iap2MessageIds.CARPLAY_START_SESSION) {
                 handleLateStartSession(frame)
             }
+            try {
+                maybeAnswerIdentification(frame)
+            } catch (e: IOException) {
+                log("iap2 应答设备识别失败（链路已断开）：${e.message}")
+                break
+            }
             if (frame.messageId == lastLoggedId) {
                 repeatCount++
                 if (repeatCount % 100 != 0) continue
@@ -535,11 +551,13 @@ class Iap2SenderSession(
                         gotFailure = true
                     }
 
-                    else ->
+                    else -> {
+                        maybeAnswerIdentification(frame)
                         log(
                             "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
                                 "(${Iap2MessageIds.nameOf(frame.messageId)})",
                         )
+                    }
                 }
                 if (gotResponse || gotFailure) break
             }
@@ -632,6 +650,11 @@ class Iap2SenderSession(
                 continue
             }
             if (frame.messageId == messageId) return frame
+            if (maybeAnswerIdentification(frame)) {
+                // 已应答的 0x1D00 不入暂存区：暂存后会在其他等待循环被二次消费，
+                // 触发重复应答（第二条 0x1D01 会打乱车机的会话状态机）
+                continue
+            }
             log(
                 "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
                     "(${Iap2MessageIds.nameOf(frame.messageId)})，非预期，暂存待后续消费",
@@ -676,11 +699,13 @@ class Iap2SenderSession(
                     return
                 }
 
-                else ->
+                else -> {
+                    maybeAnswerIdentification(frame)
                     log(
                         "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
                             "(${Iap2MessageIds.nameOf(frame.messageId)})",
                     )
+                }
             }
         }
     }
@@ -892,6 +917,87 @@ class Iap2SenderSession(
         }
         log("iap2 0x1d01 原始体=" + frame.body.joinToString("") { "%02x".format(it) })
     }
+
+    /**
+     * 应答车机主动发起的设备识别（车机 → 手机 StartIdentification 0x1D00）。
+     *
+     * iAP2 识别是**双向**的：手机先发 0x1D00 要车机身份（[run] 的固定序列），
+     * 车机同样可以反向要求设备身份，真 iPhone 必答。此前所有到站的 0x1D00 都被
+     * 暂存/记日志——车机拿不到设备的身份与消息能力清单（0x1D01 参数 6/7 里的
+     * CarPlay 消息家族），无从判定设备支持 CarPlay，严格校验设备侧的车机（BMW
+     * EVO ID6 实测）会把整台设备判成「设备不支持 Apple CarPlay」并不再下发 0x4301。
+     *
+     * 回送内容对照真 iPhone：身份字段（name/model/manufacturer/serial/firmware）
+     * + 收/发消息能力清单（含完整 CarPlay 家族）+ 语言。每会话最多应答一次；
+     * 只有收到 0x1D00 才触发，奥迪/DiPlay 从不发该消息——对既有通路零影响。
+     *
+     * @return true 表示已应答（调用方不应再暂存该帧，避免二次消费重复应答）
+     */
+    private fun maybeAnswerIdentification(frame: Iap2Csm.Frame): Boolean {
+        if (frame.messageId != Iap2MessageIds.START_IDENTIFICATION) return false
+        if (deviceIdentificationAnswered) {
+            log("iap2 rx=0x1d00 车机重复请求设备识别——本轮已应答，忽略")
+            return true
+        }
+        deviceIdentificationAnswered = true
+        log(
+            "iap2 rx=0x1d00 车机请求设备识别——回送设备侧 IdentificationInformation " +
+                "(name=$deviceName model=$DEVICE_MODEL_IDENTIFIER fw=$DEVICE_FIRMWARE_VERSION)",
+        )
+        send(Iap2MessageIds.IDENTIFICATION_INFORMATION, deviceIdentification())
+        return true
+    }
+
+    /**
+     * 设备侧 IdentificationInformation（0x1D01）体。
+     *
+     * 参数 6/7（收/发消息清单）是车机判定 CarPlay 能力的核心：必须包含完整
+     * CarPlay 家族（0x4300/0x4301/0x4E0x/0x5702/0x5703）。清单逐字节写入日志
+     * （send 的 tx 行 + 本函数返回值由调用方记录），真车实测后可按需修正。
+     */
+    private fun deviceIdentification(): ByteArray {
+        val sentByDevice =
+            intArrayOf(
+                0x1D00, 0x1D02,
+                0x4300,
+                0x4E09, 0x4E0A, 0x4E0B, 0x4E0C, 0x4E0D, 0x4E0E,
+                0x5702,
+                0xAA00, 0xAA02, 0xAA04, 0xAA05,
+                0x6801,
+                0xEA00, 0xEA01,
+                0x5001, 0x4155, 0x4158, 0x4171, 0x5201, 0xAE01,
+                0xFFFA, 0xFFF0,
+            )
+        val acceptedByDevice =
+            intArrayOf(
+                0x1D00, 0x1D01,
+                0x4301, 0x5703,
+                0xAA01, 0xAA03, 0xAA06,
+                0x6800, 0x6802, 0x6803,
+                0x5000, 0x4157, 0x4154, 0x4170, 0x5200, 0xAE00,
+                0xEA02, 0xEA03,
+                0xFFFB,
+            )
+        val supportedLanguages = "zh".encodeToByteArray() + byteArrayOf(0) + "en".encodeToByteArray() + byteArrayOf(0)
+        return Iap2Csm.string(0, deviceName) +
+            Iap2Csm.string(1, DEVICE_MODEL_IDENTIFIER) +
+            Iap2Csm.string(2, "Apple Inc.") +
+            Iap2Csm.string(3, deviceSerialNumber()) +
+            Iap2Csm.string(4, DEVICE_FIRMWARE_VERSION) +
+            Iap2Csm.u16List(6, sentByDevice) +
+            Iap2Csm.u16List(7, acceptedByDevice) +
+            Iap2Csm.string(12, "zh") +
+            Iap2Csm.param(13, supportedLanguages)
+    }
+
+    /** 设备序列号：由蓝牙 MAC 确定性派生（12 位大写字母数字），跨会话稳定。 */
+    private fun deviceSerialNumber(): String =
+        java.util.UUID
+            .nameUUIDFromBytes(("serial:$bluetoothMac").toByteArray())
+            .toString()
+            .replace("-", "")
+            .uppercase()
+            .take(12)
 
     private fun remainingMillis(deadlineNanos: Long): Long {
         val remaining = (deadlineNanos - System.nanoTime()) / 1_000_000L

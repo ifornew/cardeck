@@ -555,11 +555,6 @@ object VirtualLauncher {
                         "app=$appDisplayId(${appWidth}x$appHeightPx @${appNativeDensity}dpi) " +
                         "appHi=$appHiDisplayId(${appHiWidth}x$appHiHeight @${appHiDensity}dpi scale=x$appScaleFactor)",
                 )
-                // 会话建立：为「强制应用横屏」名单内的应用逐个写入兼容覆盖
-                // （会话结束/断开时由 SessionController 统一复原，见 retireSession/onEnded）。
-                // 异步：6 个应用 × 2 次 am compat ≈1.6s，此前同步跑在虚拟屏 attach 里，
-                // 直接推迟首帧（2026-10-18 实测）。
-                AppOrientationCompat.applyAllAsync(context, log)
                 // 音乐卡数据源前置：会话建立是「Shizuku 一定可用」的可靠时机，
                 // 补一次通知使用权（幂等；已授权直接返回）。
                 // 覆盖「App 启动时 Shizuku 未就绪、之后才就绪」的整条路径。
@@ -675,6 +670,11 @@ object VirtualLauncher {
             // 点击漂移、点不到目标」，退回桌面也仍是旋转态（2026-10-18 实测）。
             // 缩在 letterbox 里（见下方 aspectRatio）才是车机该有的形态。
             applyIgnoreOrientationRequest(appDisplayId, appHiDisplayId, mapDisplayId)
+            // 会话建立：为「强制应用横屏」名单启用系统侧覆盖（仅 SDK≥34 且 ChangeId
+            // 已注册的 per-app 通路；freeform 通路无系统侧写入，launchApp 启动时生效）。
+            // 异步：名单 6 个应用 × 2 次 am compat ≈1.6s，此前同步跑在虚拟屏 attach
+            // 里，直接推迟首帧（2026-10-18 实测）。
+            AppOrientationCompat.applyAllAsync(context, log)
             // 放宽竖屏应用的 letterbox 窗口（默认窄条 → 手机宽度）；断开时还原（detach）
             Shell.exec("cmd window set-letterbox-style --aspectRatio $LETTERBOX_ASPECT_RATIO")
             log(
@@ -1020,6 +1020,18 @@ object VirtualLauncher {
     ): List<String> = snapshot[displayId]?.get(pkg).orEmpty()
 
     /**
+     * 各任务的窗口模式快照（`dumpsys activity containers` 一次解析）：taskId → 是否 freeform。
+     * 用于 freeform 横屏通路的「既有任务模式与偏好不符则重建」判定；
+     * `dumpsys activity activities` 的 Task 行不含窗口模式，故单独取这份快照。
+     */
+    private fun freeformTaskModes(): Map<String, Boolean> {
+        val dump = Shell.exec("dumpsys activity containers", timeoutMs = 4000).output
+        return Regex("""Task=(\d+) type=standard mode=(\w+)""")
+            .findAll(dump)
+            .associate { it.groupValues[1] to (it.groupValues[2] == "freeform") }
+    }
+
+    /**
      * 确保默认地图在地图屏：am start 对既有任务=带回前台（状态保留，导航不断），
      * 无任务=新启动。后台线程调用。
      */
@@ -1089,9 +1101,31 @@ object VirtualLauncher {
                 appHiDisplayId >= 0 &&
                 SupersamplePrefs.shouldSupersample(ctx, component)
         val targetDisplay = if (wantHi) appHiDisplayId else appDisplayId
+        // 强制横屏的 freeform 通路（per-app ChangeId 不可用的机型）：多窗口模式跳过
+        // 方向 letterbox，应用按满屏横屏窗口绘制（2026-10-21 SDK31 实车实测：
+        // 抖音 freeform 任务 bounds=满屏，画面铺满无黑边）。EMUI 上新建 freeform
+        // 任务默认即满屏边界；其他 ROM 若默认窗口偏小需后续再补 bounds 处理。
+        val wantFreeform =
+            ctx != null &&
+                AppOrientationCompat.landscapeViaFreeform() &&
+                AppOrientationCompat.isEnabled(ctx, component.packageName)
         // 任务查询共用一次 dumpsys 快照（此前 onTarget + 清理两块屏最多连跑 3 遍 4s 超时命令）
         val tasks = taskIdsByDisplayPkg()
-        val onTarget = tasksOf(tasks, component.packageName, targetDisplay).isNotEmpty()
+        var onTarget = tasksOf(tasks, component.packageName, targetDisplay).isNotEmpty()
+        if (onTarget && AppOrientationCompat.landscapeViaFreeform()) {
+            // 既有任务窗口模式与偏好不符（偏好切换前建的/外部落入的）：清任务重建——
+            // 否则 am start 只把旧任务带到前台，横屏开关看似「没效果」。
+            // am stack remove 只销毁活动栈不杀进程（手机侧实例不受影响）。
+            val modes = freeformTaskModes()
+            val mismatched =
+                tasksOf(tasks, component.packageName, targetDisplay)
+                    .filter { (modes[it] ?: false) != wantFreeform }
+            if (mismatched.isNotEmpty()) {
+                mismatched.forEach { Shell.exec("am stack remove $it", timeoutMs = 4000) }
+                Log.i(TAG, "任务窗口模式不符重建 pkg=${component.packageName} tasks=$mismatched wantFreeform=$wantFreeform")
+                onTarget = false
+            }
+        }
         if (!onTarget) {
             // 偏好切换后清理另一块应用屏上的旧任务（不同屏双实例会各自维护状态，易混淆）
             val otherDisplay = if (targetDisplay == appHiDisplayId) appDisplayId else appHiDisplayId
@@ -1108,21 +1142,23 @@ object VirtualLauncher {
             } else {
                 component.flattenToShortString()
             }
+        val freeformArg = if (wantFreeform) " --windowingMode 5" else ""
         val result =
             if (onTarget) {
-                Shell.exec("am start -n $target --display $targetDisplay", timeoutMs = 8000)
+                Shell.exec("am start -n $target --display $targetDisplay$freeformArg", timeoutMs = 8000)
             } else {
                 // MULTIPLE_TASK：即使该应用在其他屏有任务，也强制在目标屏新建实例
-                Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
+                Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000$freeformArg", timeoutMs = 8000)
             }
         var ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
         if (!ok && onTarget) {
             // 复用路径失败（任务可能已被系统移走）：退回 MULTIPLE_TASK 新建
-            val retry = Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
+            val retry =
+                Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000$freeformArg", timeoutMs = 8000)
             ok = retry.ok && retry.output.contains("Starting:", ignoreCase = true)
         }
         logSink?.invoke(
-            "LAUNCH(${component.packageName}): hi=$wantHi disp=$targetDisplay onTarget=$onTarget ok=$ok " +
+            "LAUNCH(${component.packageName}): hi=$wantHi ff=$wantFreeform disp=$targetDisplay onTarget=$onTarget ok=$ok " +
                 "out=${result.output.take(80)}",
         )
         if (ok) {

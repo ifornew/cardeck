@@ -165,9 +165,10 @@ class OrientationPanelFragment : SettingsPanelFragment() {
     /**
      * 本机是否支持「强制横屏」——null = 探测中。
      *
-     * 两个 ChangeId 是 OEM 定制项（AOSP 标准表里没有）：荣耀 Android 15 注册了，
-     * 红米 Android 13 没注册。不支持时整列置灰并给出原因，否则用户会反复点开关、
-     * 每次只得到失败提示（2026-10-18 实测）。
+     * 两条通路任一可用即视为支持：per-app ChangeId（Android 14+，荣耀 Android 15
+     * 注册了、红米 Android 13 没注册）或 freeform 自由窗口启动（Android 12 起，
+     * 华为 EMUI 14.2/SDK31 实车实测铺满）。都不支持时整列置灰并给出原因，
+     * 否则用户会反复点开关、每次只得到失败提示（2026-10-18 实测）。
      */
     private var supported: Boolean? = null
 
@@ -182,9 +183,9 @@ class OrientationPanelFragment : SettingsPanelFragment() {
         listAdapter = OrientationAdapter()
         // 应用清单就绪后重算横幅（首帧 apps 为空，全部会被误判成「不在列表」）
         setupAppList(view, R.id.oriList, R.id.oriListIndex, listAdapter) { updateOrphanBanner() }
-        // 能力探测：一次 dumpsys（约 30ms，结果进程内缓存），与系统状态查询并行
+        // 能力探测：dumpsys（约 30ms，结果进程内缓存）+ freeform 版本门槛，与系统状态查询并行
         Bg.run("orientation-capability") {
-            val ok = AppOrientationCompat.changeIdsRegistered()
+            val ok = AppOrientationCompat.changeIdsRegistered() || AppOrientationCompat.freeformLaunchSupported()
             activity?.runOnUiThread {
                 if (!isAdded || isDetached) return@runOnUiThread
                 supported = ok
@@ -223,8 +224,7 @@ class OrientationPanelFragment : SettingsPanelFragment() {
         }
         banner.visibility = View.VISIBLE
         banner.text =
-            "本机系统不支持该功能：需要 Android 14 及以上" +
-            "（这两个横屏兼容项自 Android 14 起才进入平台）。\n" +
+            "本机系统不支持该功能：需要 Android 12 及以上。\n" +
             "当前 Android ${android.os.Build.VERSION.RELEASE}" +
             "（SDK ${android.os.Build.VERSION.SDK_INT}），开关置灰不可用。"
         // 整列变暗表达「不可操作」；点击事件在 OriHolder 里按 supported 拦截
@@ -342,7 +342,7 @@ class OrientationPanelFragment : SettingsPanelFragment() {
                                 if (AppOrientationCompat.changeIdsRegistered()) {
                                     "系统限制：user 版本只能修改可调试(debuggable)应用的兼容设置"
                                 } else {
-                                    "本机系统不支持该功能（需 Android 14 及以上）"
+                                    "本机 ROM 未注册横屏兼容项"
                                 },
                             )
                         }

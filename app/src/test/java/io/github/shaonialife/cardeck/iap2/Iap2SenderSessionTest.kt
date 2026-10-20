@@ -139,6 +139,56 @@ class Iap2SenderSessionTest {
         accessoryChannel.close()
     }
 
+    /**
+     * BMW EVO ID6 形态：车机在识别阶段反向发送 StartIdentification(0x1D00) 要求设备身份。
+     * 旧实现把这条消息暂存不理——车机拿不到设备的身份与收/发消息能力清单
+     * （0x1D01 参数 6/7 里的 CarPlay 家族），把设备判成「不支持 Apple CarPlay」，
+     * 不再下发 0x4301。本用例锁住：收到 0x1D00 必须回送设备侧 IdentificationInformation，
+     * 且能力清单完整声明 CarPlay 消息家族。
+     */
+    @Test
+    fun answersAccessoryInitiatedIdentificationWithDeviceCapabilities() {
+        val pair = InMemoryStreamPair()
+        val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
+        val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
+        val accessory = MockAccessory(accessoryChannel, requestDeviceIdentification = true)
+
+        val accessoryThread = Thread({ accessory.run() }, "mock-accessory")
+        accessoryThread.isDaemon = true
+        accessoryThread.start()
+
+        Iap2SenderSession(
+            phoneChannel,
+            log = { line -> println("PHONE $line") },
+            bluetoothMac = "34:86:DA:86:BB:96",
+            deviceName = "test-device",
+        ).run(timeoutMillis = 10_000L)
+
+        val answer = accessory.deviceIdentificationFrame
+        assertNotNull("车机 0x1D00 未收到设备侧 IdentificationInformation", answer)
+        val params = Iap2Csm.parseParams(answer!!.body).associateBy { it.id }
+        fun text(id: Int) = String(params.getValue(id).value).trimEnd('\u0000')
+        assertEquals("test-device", text(0))
+        assertEquals("Apple Inc.", text(2))
+        fun list(id: Int) =
+            params.getValue(id).value
+                .toList()
+                .chunked(2)
+                .map { pair -> ((pair[0].toInt() and 0xFF) shl 8) or (pair[1].toInt() and 0xFF) }
+        val sent = list(6)
+        val accepted = list(7)
+        // CarPlay 消息家族必须完整声明——车机据此判定设备支持 CarPlay
+        assertTrue(0x4300 in sent)
+        assertTrue(0x4E0D in sent)
+        assertTrue(0x4E0E in sent)
+        assertTrue(0x5702 in sent)
+        assertTrue(0x4301 in accepted)
+        assertTrue(0x5703 in accepted)
+
+        phoneChannel.close()
+        accessoryChannel.close()
+    }
+
     /** 按 DiPlay Iap2WirelessControlClient 的时序脚本化应答。 */
     private class MockAccessory(
         private val channel: Iap2LinkChannel,
@@ -151,14 +201,28 @@ class Iap2SenderSessionTest {
          * IPv4 后跟 5 个）。用于锁定「必须去掉全部尾部 NUL」这一行为。
          */
         private val padAddresses: Boolean = false,
+        /**
+         * BMW 形态：车机在识别阶段反向发送 StartIdentification(0x1D00) 要求设备身份
+         * （iAP2 双向识别）。发送端必须回送设备侧 IdentificationInformation。
+         */
+        private val requestDeviceIdentification: Boolean = false,
     ) {
         private val parser = Iap2Csm.Parser()
         private val pending = ArrayDeque<Iap2Csm.Frame>()
+
+        /** 车机 0x1D00 收到的设备侧 IdentificationInformation（供用例断言）。 */
+        var deviceIdentificationFrame: Iap2Csm.Frame? = null
+            private set
 
         fun run() {
             check(channel.awaitReady(10_000)) { "mock link not ready" }
 
             expect(Iap2MessageIds.START_IDENTIFICATION)
+            if (requestDeviceIdentification) {
+                // 车机先反向要设备身份，再交出自己的身份（真 iPhone 必答）
+                send(Iap2MessageIds.START_IDENTIFICATION)
+                deviceIdentificationFrame = expectFrame(Iap2MessageIds.IDENTIFICATION_INFORMATION)
+            }
             send(
                 Iap2MessageIds.IDENTIFICATION_INFORMATION,
                 Iap2Csm.string(0, "MockCarPlay"),
@@ -281,6 +345,10 @@ class Iap2SenderSessionTest {
         }
 
         private fun expect(messageId: Int) {
+            expectFrame(messageId)
+        }
+
+        private fun expectFrame(messageId: Int): Iap2Csm.Frame {
             println("MOCK expect 0x${messageId.toString(16)}")
             val frame =
                 recvFrame(10_000)
@@ -289,6 +357,7 @@ class Iap2SenderSessionTest {
                 "mock expected 0x${messageId.toString(16)} got 0x${frame.messageId.toString(16)}"
             }
             println("MOCK got 0x${frame.messageId.toString(16)}")
+            return frame
         }
 
         private fun recvFrame(timeoutMillis: Long): Iap2Csm.Frame? {

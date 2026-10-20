@@ -6,12 +6,20 @@ import io.github.shaonialife.cardeck.shizuku.Shell
 import java.util.concurrent.Executors
 
 /**
- * 「强制应用横屏」兼容覆盖的唯一管理口：
- *   - 用户偏好持久化在本应用 SharedPreferences（页面开关读写）；
- *   - 系统侧覆盖（am compat，持久）只在**会话期间**保持：
- *     会话建立时 [applyAllAsync] 逐应用写入，
- *     会话结束（断开/推流终止）时 [resetAllAsync] 统一复原——
- *     避免覆盖残留影响应用在手机侧的正常竖屏使用。
+ * 「强制应用横屏」兼容覆盖的唯一管理口，两条通路按平台能力二选一：
+ *   1. **per-app ChangeId 覆盖**（am compat，Android 14+ 且 ChangeId 已注册）：
+ *      逐应用写入，只在**会话期间**保持——会话建立时 [applyAllAsync] 写入，
+ *      会话结束（断开/推流终止）时 [resetAllAsync] 统一复原，
+ *      避免覆盖残留影响应用在手机侧的正常竖屏使用。
+ *   2. **freeform 自由窗口启动**（其余全部机型；minSdk=31 即全覆盖）：
+ *      多窗口模式跳过方向 letterbox，`am start --windowingMode 5` 启动的应用
+ *      按满屏横屏窗口绘制。无任何系统侧写入，[VirtualLauncher.launchApp]
+ *      启动时按偏好生效，随虚拟屏销毁失效。
+ *      （2026-10-21 华为 NOH-AN00 EMUI14.2 SDK31 实车实测：抖音 freeform 任务
+ *      bounds=[0,0][1864,1440] 满屏，画面铺满无黑边；此前验证的
+ *      fixed-to-user-rotation 通路写读全成功但对 letterbox 窗口无效，已移除。）
+ *
+ * 用户偏好持久化在本应用 SharedPreferences（页面开关读写），两条通路共用。
  *
  * **必须在连接关键路径之外执行**：每个应用两次 `am compat` 都是 shell 往返，
  * 名单 6 个应用实测 ~1.6-2.0s。此前复原在配对前同步跑、写入在虚拟屏 attach 里
@@ -39,6 +47,21 @@ object AppOrientationCompat {
         Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "orientation-compat").apply { isDaemon = true }
         }
+
+    /**
+     * 强制横屏是否走 **freeform 自由窗口**通路：per-app ChangeId 通路不可用
+     * （SDK<34，或 A14+ 但 ROM 裁剪了 ChangeId）时的替代机制。
+     * freeform 无需任何系统侧写入，启动时带 `--windowingMode 5` 即可。
+     */
+    fun landscapeViaFreeform(): Boolean =
+        Build.VERSION.SDK_INT < MIN_SUPPORTED_SDK || !changeIdsRegistered()
+
+    /**
+     * freeform 通路本身是否可用：多窗口自由形态自 Android 7.0 起进 AOSP，
+     * 本应用 minSdk=31（Android 12），即全部受支持设备可用
+     * （2026-10-21 SDK31 虚拟屏实测：任务满屏、应用横屏铺满）。
+     */
+    fun freeformLaunchSupported(): Boolean = Build.VERSION.SDK_INT >= 31
 
     /** 偏好键统一按「包名」存取（am compat 也以包名为对象；读取侧统一 removePrefix 兼容旧键）。 */
     private fun key(pkg: String) = "force_$pkg"
@@ -123,6 +146,13 @@ object AppOrientationCompat {
         pkg: String,
         enable: Boolean,
     ): WriteResult {
+        // freeform 通路（SDK<34 或 ChangeId 被裁剪）：无任何系统侧写入——
+        // 横屏在启动时由 VirtualLauncher.launchApp 带 --windowingMode 5 生效，
+        // 这里只落偏好。freeform 自 Android 7.0 进 AOSP、minSdk=31 全覆盖，恒可支持。
+        if (landscapeViaFreeform()) {
+            prefs(context).edit().putBoolean(key(pkg), enable).apply()
+            return WriteResult.OK
+        }
         val action = if (enable) "enable" else "disable"
         val first = Shell.exec("am compat $action $CHANGE_UNDEFINED_TO_NOSENSOR $pkg", timeoutMs = 4000)
         val second =
@@ -222,13 +252,17 @@ object AppOrientationCompat {
     @Volatile
     var diagSink: ((String) -> Unit)? = null
 
-    /** 异步版 [applyAll]：连接关键路径调用（log 在完成后回调，便于排查）。 */
+    /**
+     * 异步版 [applyAll]：连接关键路径调用（log 在完成后回调，便于排查）。
+     * freeform 通路无系统侧写入（启动时生效），直接跳过。
+     */
     fun applyAllAsync(
         context: Context,
         log: (String) -> Unit,
     ) {
         val app = context.applicationContext
         executor.execute {
+            if (landscapeViaFreeform()) return@execute
             val count = runCatching { applyAll(app) }.getOrDefault(0)
             if (count > 0) log("ORIENTATION: 已为 $count 个应用启用强制横屏（会话期间生效）")
         }
