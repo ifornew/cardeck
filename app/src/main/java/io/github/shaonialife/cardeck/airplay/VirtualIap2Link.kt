@@ -1,6 +1,9 @@
 package io.github.shaonialife.cardeck.airplay
 
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import io.github.shaonialife.cardeck.iap2.Iap2Csm
 import io.github.shaonialife.cardeck.iap2.Iap2LinkEngine
 import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
@@ -41,6 +44,8 @@ class VirtualIap2Link(
     private val alive: () -> Boolean,
     /** MFi 长度记忆的持久化上下文；null = 进程内记忆（单测）。 */
     private val mfiContext: Context? = null,
+    /** 读电池状态的上下文（用于应答车机 0xAE00 电源订阅）；null = 固定值（单测）。 */
+    private val batteryContext: Context? = null,
     /** 时钟（单测可注入）。 */
     private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L },
 ) {
@@ -590,6 +595,23 @@ class VirtualIap2Link(
                 log("IAPLINK: MIB3 0x5000 → 0x5001（空态）——仪表盘媒体数据待接")
             }
 
+            Iap2MessageIds.START_POWER_UPDATES -> {
+                // 车机订阅电源状态 → 回一次 0xAE01（真 iPhone 的应答姿态）。
+                // xcertplay 发 0xAE00 时订阅 void(4)/void(5)/void(6)；
+                // BMW 车机只订阅 void(6)。旧布局 param 0/1 不在订阅清单内 → 不显示电量。
+                val battery = readBattery()
+                sendCsmLocked(
+                    Iap2MessageIds.POWER_UPDATE,
+                    Iap2Csm.param(0x0004, byteArrayOf(battery.first.toByte())) +
+                        Iap2Csm.param(0x0005, byteArrayOf(if (battery.second) 1 else 0)) +
+                        Iap2Csm.param(0x0006, byteArrayOf(battery.first.toByte())),
+                )
+                log(
+                    "IAPLINK: 车机 0xae00 → 0xae01 电源更新" +
+                        "（电量 ${battery.first}%，${if (battery.second) "充电中" else "未充电"}）",
+                )
+            }
+
             ids.START_HID -> {
                 // 车机声明「我要开始发 HID 报告了」，通常带描述符（决定报告字节语义）
                 val params = Iap2Csm.parseParams(frame.body)
@@ -651,6 +673,29 @@ class VirtualIap2Link(
                 }
             }
         }
+    }
+
+    /**
+     * 当前电量百分比与是否在充电（sticky 电池广播，注册即回填当前值）。
+     * 无上下文（单测）或读不到时按「100%、未充电」回——电源更新只是状态通告，
+     * 缺数据不该让车机等待。
+     */
+    private fun readBattery(): Pair<Int, Boolean> {
+        val ctx = batteryContext ?: return 100 to false
+        val intent =
+            try {
+                ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            } catch (_: Exception) {
+                null
+            }
+        val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val percent = if (level >= 0 && scale > 0) level * 100 / scale else 100
+        val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val charging =
+            status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                status == BatteryManager.BATTERY_STATUS_FULL
+        return percent.coerceIn(0, 100) to charging
     }
 
     /**

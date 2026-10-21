@@ -588,6 +588,21 @@ class AirPlayClient(
         }
     }
 
+    /**
+     * 动态补启音频时把主音频资源补进 modesChanged。
+     *
+     * 连接时音频没开（或投屏授权被撤回）→ 当时只声明了主屏；之后用户开声音再起流，
+     * 资源归属就和实际推流不一致了。真 iPhone 的 modesChanged 声明与随后的流严格对应，
+     * 所以起流前必须补声明（2026-10-22 BMW G32：补声明后 71s 断链依旧，说明它不是
+     * 断链主因，但资源与流不一致本身仍是缺陷）。
+     */
+    fun claimMainAudioResource(): Boolean {
+        if (claimsMainAudio) return true
+        claimsMainAudio = true
+        log("AIRPLAY: 动态启用音频——补发 modesChanged 声明主音频资源")
+        return assertModes()
+    }
+
     fun assertModes(): Boolean {
         // 主音频只在本次真会推音频时才声明：占了资源却没有流，车机会等一条永远不来的
         // 音频流并在固定窗口后关掉整条会话（见 [claimsMainAudio]）。
@@ -1318,6 +1333,7 @@ class AirPlayClient(
                     sendControlIap = ::postControlIap,
                     tunnelWriter = { iapTunnel },
                     alive = { socket?.isClosed == false },
+                    batteryContext = context,
                 ).also {
                     it.onMediaKey = { keyCode -> onMediaKey?.invoke(keyCode) }
                     it.begin()

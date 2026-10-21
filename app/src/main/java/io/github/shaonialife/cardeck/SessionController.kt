@@ -622,7 +622,7 @@ object SessionController {
             synchronized(wifiBindLock) {
                 val existing = connector.currentNetwork
                 if (boundCarSsid == wifi.ssid && existing != null) {
-                    appendLog("WIFI: 应用专属网络已在位——跳过重复加入")
+                    appendLog("WIFI: 网络已在位——跳过重复加入")
                     WifiCarPlayConnector.JoinResult.Joined(existing)
                 } else {
                     connector.joinCarPlayNetwork(
@@ -639,9 +639,9 @@ object SessionController {
             phaseHint = "已加入车机热点"
             // 关键时机：bindProcessToNetwork 完成后再注册，车机才能看到 ctrl 广播
             ctrlAdvertiser?.ensureForNetwork(wifi.ssid, force = true, network = connector.currentNetwork)
-            appendLog(">>> WiFi 已加入车机热点（应用专属网络），ctrl 广播已重新注册，等待车机 ctrl 邀请")
+            appendLog(">>> WiFi 已加入车机热点，ctrl 广播已重新注册，等待车机 ctrl 邀请")
         } else if (!connectCancelled) {
-            appendLog("WIFI: 应用专属网络加入未成功（${result.javaClass.simpleName}）")
+            appendLog("WIFI: 加入车机热点未成功（${result.javaClass.simpleName}）")
         }
         return result
     }
@@ -1179,6 +1179,9 @@ object SessionController {
             // SETUP 失败不会扰动会话（车机只是不接这条流的请求），所以本会话内就把候选
             // 试完，不必等下一次连接。这一点对当前场景很关键：102/AAC-LC 与 100/PCM 是
             // 两条完全不同的通路，前者不被接受时应当立刻退到后者，而不是让用户白连一次。
+            // 音频起流前先确保资源归属：连接时若没开声音，modesChanged 只声明了主屏，
+            // 这里补发一次（否则「未声明就推音频」会被车机在 ~35s 后整链拆掉）。
+            client.claimMainAudioResource()
             var chosen: AudioProfile? = null
             var streamInfo: AirPlayClient.AudioStreamInfo? = null
             for (candidate in ordered) {

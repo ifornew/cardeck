@@ -61,6 +61,7 @@ object Iap2MessageIds {
     const val START_NOW_PLAYING_UPDATES = 0x5000
     const val START_ROUTE_GUIDANCE_UPDATES = 0x5200
     const val START_POWER_UPDATES = 0xAE00
+    const val POWER_UPDATE = 0xAE01 // 手机 → 配件（应答 0xAE00 订阅）
     const val START_COMMUNICATIONS_UPDATES = 0x4157
     const val START_CALL_STATE_UPDATES = 0x4154
 
@@ -91,6 +92,7 @@ object Iap2MessageIds {
             START_NOW_PLAYING_UPDATES -> "StartNowPlayingUpdates"
             START_ROUTE_GUIDANCE_UPDATES -> "StartRouteGuidanceUpdates"
             START_POWER_UPDATES -> "StartPowerUpdates"
+            POWER_UPDATE -> "PowerUpdate"
             START_COMMUNICATIONS_UPDATES -> "StartCommunicationsUpdates"
             START_CALL_STATE_UPDATES -> "StartCallStateUpdates"
             else -> "0x%04X".format(messageId)
