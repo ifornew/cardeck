@@ -164,7 +164,16 @@ object BtProfiles {
             Log.w(TAG, "proxy() 在主线程调用——getProfileProxy 回调会被阻塞，返回 null")
             return null
         }
-        if (!latch.await(1_200, TimeUnit.MILLISECONDS)) return null
+        // InterruptedException 必须自己吞掉：Kotlin 不强制检查，以前它会一路冒泡成
+        // 线程级 FATAL EXCEPTION 直接杀进程（2026-10-21 18:17 实测，iap2-bt-client）。
+        val done =
+            try {
+                latch.await(1_200, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                false
+            }
+        if (!done) return null
         return ref.get()?.also { synchronized(proxies) { proxies[profile] = it } }
     }
 

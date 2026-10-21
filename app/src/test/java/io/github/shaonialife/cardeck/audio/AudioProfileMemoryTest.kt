@@ -45,20 +45,19 @@ class AudioProfileMemoryTest {
     }
 
     @Test
-    fun allRejectedKeepsTryingInsteadOfGoingSilent() {
+    fun allRejectedStillTriesWithRiskyLast() {
         val all = hondaCandidates.map { it.key }.toSet()
         val ordered = AudioProfileMemory.order(hondaCandidates, AudioProfileMemory.Entry(rejected = all))
-        // 全被判死说明与记忆矛盾（换车机/固件升级沿用同一身份键）——照常全试，避免永久无声
+        // 记忆只用于排序：用户显式开了声音就要真试一次，不能因为历史结论永久静音
+        // （2026-10-22 实车反馈「无法推送声音了」）
         assertEquals(hondaCandidates.size, ordered.size)
+        assertEquals(hondaCandidates.map { it.key }.toSet(), ordered.map { it.key }.toSet())
     }
 
     @Test
-    fun disabledMeansNoAudioAtAll() {
-        assertTrue(
-            AudioProfileMemory
-                .order(hondaCandidates, AudioProfileMemory.Entry(disabled = true))
-                .isEmpty(),
-        )
+    fun disabledEntryStillOrdersInsteadOfMuting() {
+        val ordered = AudioProfileMemory.order(hondaCandidates, AudioProfileMemory.Entry(disabled = true))
+        assertEquals(hondaCandidates.size, ordered.size)
         assertFalse(AudioProfileMemory.order(emptyList(), AudioProfileMemory.Entry()).isNotEmpty())
     }
 
@@ -110,6 +109,7 @@ class AudioProfileMemoryTest {
         AudioProfileMemory.recordRejected(null, id, "media|2048", all)
         AudioProfileMemory.recordRejected(null, id, "compatibility|32768", all)
         assertTrue(AudioProfileMemory.load(null, id).disabled)
-        assertTrue(AudioProfileMemory.order(hondaCandidates, AudioProfileMemory.load(null, id)).isEmpty())
+        // 记忆仍标记「全部踩雷」，但排序照常给出候选（显式开声音时仍会试）
+        assertFalse(AudioProfileMemory.order(hondaCandidates, AudioProfileMemory.load(null, id)).isEmpty())
     }
 }

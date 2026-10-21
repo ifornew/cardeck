@@ -1104,6 +1104,24 @@ object SessionController {
     // ---- 以下方法体自 MainActivity 原样迁入（会话逻辑不依赖 Activity）----
 
     /**
+     * 本次会话是否真的会推主音频：与 [startAudioChannel] 的前置门槛保持一致。
+     *
+     * 用于 modesChanged 的资源声明——不推音频就不占主音频资源。2026-10-22 BMW G32
+     * 实测：占着主音频却没有音频流时，车机会等一条永远不会来的流，两次会话分别在
+     * 81.0s / 80.7s 被车机整条关掉（mDNS goodbye → 事件通道 RST → 控制通道）。
+     */
+    private fun audioWillStreamNow(
+        client: AirPlayClient,
+        sessionKey: ByteArray?,
+    ): Boolean {
+        if (!audioEnabledForSession) return false
+        if (sessionKey == null) return false
+        if (CarPlayService.mediaProjection == null) return false
+        // 记忆只影响排序、不影响「试不试」，所以这里只看到底有没有候选档位
+        return client.audioCandidates(preferCompat = audioPreferCompat).isNotEmpty()
+    }
+
+    /**
      * 音频通道（手机 → 车机，RTP over UDP）：SETUP type=100 协商 → 播放捕获 → ChaCha 封包推流。
      *
      * 依赖 MediaProjection（AudioPlaybackCapture 的授权来源），且需用户在「启动连接」
@@ -1140,18 +1158,13 @@ object SessionController {
             return false
         }
         return try {
-            // 车机身份 → 只用于「本车机哪些音频档位踩过雷」的持久化记忆。
+            // 车机身份 → 只用于「本车机哪些音频档位踩过雷」的持久化记忆（决定排序）。
             val identity = client.receiverIdentity()
             // 音频封装参数已定案（见 AudioTuning），不再提供切换
             val tuning = AudioTuning.RAW_SPF
+            // 记忆只用于排序：用户显式开了声音，本会话就真试一次。此前「全档位拆链后
+            // 永久静音」会让用户再也推不出声音（2026-10-22 反馈），也违背了弹窗的显式选择。
             val entry = AudioProfileMemory.load(context.applicationContext, identity)
-            if (entry.disabled) {
-                // 以前「全部档位都导致拆链」会自动退成只推视频，并要用户去弹窗里手点
-                // 「清除记忆」。现在音频通路已换成 AAC-LC 且实测能稳定跑满 147s，
-                // 旧结论不再可信：用户既然主动选了「开启声音」，就直接清记忆重试。
-                AudioProfileMemory.clearAll(context.applicationContext)
-                appendLog("AUDIO: 本车机（$identity）有「全部档位拆链」的旧记忆，已自动清除并重试")
-            }
             val candidates = client.audioCandidates(preferCompat = audioPreferCompat)
             val ordered = AudioProfileMemory.order(candidates, entry)
             if (ordered.isEmpty()) {
@@ -1262,14 +1275,14 @@ object SessionController {
             "AUDIO: ⚠ 档位 ${profile.label} 起流 ${lived / 1000}s 后整条会话被车机拆掉——" +
                 "判定为本车机不兼容档位（已记入名单）。" +
                 if (after.disabled) {
-                    "全部档位均不兼容：下次连接将自动只推视频（车机侧无声音）。"
+                    "全部档位均踩过拆链：下次连接仍会重试（已排到最后），声音可能再次中断。"
                 } else {
                     "下次点「启动连接」会自动换用下一档；也可直接选「开启声音（兼容档）」。"
                 },
         )
         uiHintSink?.invoke(
             if (after.disabled) {
-                "本车机音频不兼容，下次连接将自动只推视频"
+                "本车机音频档位全部踩过雷，重连仍会尝试（可能再次断开）"
             } else {
                 "该音频档位导致断开，已记录；重连会自动换档"
             },
@@ -1906,6 +1919,8 @@ object SessionController {
                                         )
                                 }
                             }
+                            // 本次真会推音频才占用主音频资源；否则只声明主屏
+                            client.claimsMainAudio = audioWillStreamNow(client, sessionKey)
                             // 资源声明（must）：真车对未声明资源的屏幕流 SETUP 直接 400
                             client.assertModes()
                             // HID 输入模式武装：/info hidDevices（奥迪字符串 "0"/"1"，触摸="1"）。

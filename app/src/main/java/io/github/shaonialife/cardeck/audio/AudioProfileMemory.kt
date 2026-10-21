@@ -15,8 +15,8 @@ import android.content.Context
  *
  *  - [Entry.working]：最近一次**跑满存活窗口**的档位 → 下次直接首选；
  *  - [Entry.rejected]：上线后很快被拆链的档位 → 排到最后；
- *  - [Entry.disabled]：所有档位都被拆过 → 这台车机不再尝试音频，直接只推视频
- *    （宁可没声音，也不要「一连就断」）。
+ *  - [Entry.disabled]：所有档位都被拆过 → 仅作标记（排序靠后），仍会在显式开声音时重试
+ *    （2026-10-22：永久静音会让用户再也推不出声音，改为「记忆只排序、不关声音」）。
  *
  * 判定「快」的窗口由调用方给（[SessionController] 用 20s）。
  */
@@ -135,7 +135,7 @@ object AudioProfileMemory {
     /** 打印用：压成一行日志。 */
     fun describe(entry: Entry): String =
         when {
-            entry.disabled -> "本车机音频已判定不兼容（只推视频）"
+            entry.disabled -> "全部档位踩过拆链（排序靠后，仍会重试）"
             entry.isEmpty -> "无"
             else ->
                 buildList {
@@ -147,25 +147,25 @@ object AudioProfileMemory {
     /**
      * 计算本轮的尝试顺序（纯函数，便于单测）。
      *
+     * 记忆**只用于排序**：可用的排最前，踩过「起流即拆链」的排最后；但不会因为历史结论
+     * 把音频彻底关掉——用户显式选了「开启声音」就每个会话真试一次
+     * （2026-10-22 用户反馈「无法推送声音了」：全档位被判拆链后声音永久消失）。
+     *
      * @param candidates 按「越靠前越推荐」排好的基线候选（来自车机 /info）。
      * @param entry 该车机的持久化记忆。
-     * @return 依次尝试的档位；**空列表表示不要再试音频**（记忆已判定全部档位拆链）。
+     * @return 依次尝试的档位；只有候选本身为空时才返回空。
      */
     fun order(
         candidates: List<AudioProfile>,
         entry: Entry,
     ): List<AudioProfile> {
         if (candidates.isEmpty()) return emptyList()
-        if (entry.disabled) return emptyList()
         val keys = candidates.map { it.key }.toSet()
         val rejected = entry.rejected.filter { it in keys }.toSet()
         val working = candidates.firstOrNull { it.key == entry.working }
         val rest = candidates.filter { it.key != working?.key }
-        // 只有「还有没被判死的档位」时才把 rejected 排到最后；全被判死说明与记忆矛盾
-        // （换车机/固件升级却沿用同一身份键），此时照常全试，避免永久无声。
-        val allRejected = rest.isNotEmpty() && rest.all { it.key in rejected }
-        val safe = if (allRejected) rest else rest.filter { it.key !in rejected }
-        val risky = if (allRejected) emptyList() else rest.filter { it.key in rejected }
+        val safe = rest.filter { it.key !in rejected }
+        val risky = rest.filter { it.key in rejected }
         return (listOfNotNull(working) + safe + risky).distinctBy { it.key }
     }
 

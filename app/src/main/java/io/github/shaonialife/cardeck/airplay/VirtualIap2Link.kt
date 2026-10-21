@@ -756,12 +756,18 @@ class VirtualIap2Link(
         frameCount++
         val frames = parser.offer(bytes)
         for (frame in frames) {
-            val hex = frame.body.joinToString(" ") { "%02x".format(it) }
-            if (frameCount <= 30 || frameCount % 100 == 0) {
+            // 车机→手机每条消息都要留痕（msgId + 长度）：旧实现第 31 帧起每 100 帧才打一次，
+            // 车机 1Hz 的 0xFFFB(PASCD) 因此在 23s 后「看起来断了」，其实是日志被节流——
+            // 排查断链时会把它误读成车机停止发送（2026-10-22 BMW G32）。hex 仍只在前 30 帧打。
+            val name = Iap2MessageIds.nameOf(frame.messageId)
+            if (frameCount <= 30) {
+                val hex = frame.body.joinToString(" ") { "%02x".format(it) }
                 log(
                     "IAPLINK: rx 0x${frame.messageId.toString(16)} " +
-                        "(${Iap2MessageIds.nameOf(frame.messageId)}) ${frame.body.size}B hex=${hex.take(160)}",
+                        "($name) ${frame.body.size}B hex=${hex.take(160)}",
                 )
+            } else {
+                log("IAPLINK: rx 0x${frame.messageId.toString(16)} ($name) ${frame.body.size}B")
             }
             maybeRespondControlCsmLocked(frame)
         }

@@ -234,7 +234,10 @@ class AirPlayClient(
                 if (attempt == 1 || attempt % 5 == 0) {
                     log("AIRPLAY: 车机 AirPlay 端口未开（等待你点车机上的手机图标 / 车机发 ctrl 邀请）…第 $attempt 次重试")
                 }
-                Thread.sleep(2_000)
+                // 指数退避（2s → 4s → 8s → 10s 封顶）：车机热点还没就绪时（ENONET）
+                // 每 2s 撞一次只会刷屏并空耗；120s 窗口仍能覆盖用户在车机上手动点选的等待。
+                val backoff = (2_000L * (1 shl minOf(attempt - 1, 3))).coerceAtMost(10_000L)
+                Thread.sleep(backoff)
                 continue
             }
             attemptedPairing = true
@@ -475,11 +478,22 @@ class AirPlayClient(
     }
 
     /**
-     * 声明资源归属（modesChanged）：手机持有主屏 + 主音频（对照 catplay assert_modes）。
+     * 声明资源归属（modesChanged）：手机持有主屏；本次会推音频时才加主音频（对照 catplay assert_modes）。
      * 真车验证的顺序：modesChanged → 屏幕流 SETUP。跳过此声明时 Audi MIB3 对
      * 屏幕流 SETUP 直接 400（资源仲裁未通过）。appStates：话机/导航归 None（0）、
-     * 语音 None（-1）；resources：主屏(1)/主音频(2)，entity=permanent=Controller(1)。
+     * 语音 None（-1）；resources：主屏(1)[/主音频(2)]，entity=permanent=Controller(1)。
      */
+
+    /**
+     * 本次会话是否**真的会推主音频流**：决定 modesChanged 里是否声明 resourceID=2（主音频）。
+     *
+     * 2026-10-22 BMW G32 实测：用户没开声音（或本车机音频档位全被判拆链）时，我们仍然
+     * 声明持有主音频资源，车机那边就一直在等一条永远不会来的音频流，两次会话分别在
+     * 81.0s / 80.7s 被车机整条关掉（mDNS goodbye → 事件通道 RST → 控制通道）。
+     * 不推音频时只声明主屏(1)，别占着音频资源不放。
+     */
+    @Volatile
+    var claimsMainAudio: Boolean = false
 
     // ---- 事件通道命令发送（对照 DiPlay sendCommandLocked）----
     // 车机命令双向都走事件通道 socket 上的 POST /command（不是 RTSP 控制连接！）：
@@ -575,6 +589,15 @@ class AirPlayClient(
     }
 
     fun assertModes(): Boolean {
+        // 主音频只在本次真会推音频时才声明：占了资源却没有流，车机会等一条永远不来的
+        // 音频流并在固定窗口后关掉整条会话（见 [claimsMainAudio]）。
+        val resources =
+            buildList<Map<String, Any?>> {
+                add(linkedMapOf("resourceID" to 1L, "entity" to 1L, "permanentEntity" to 1L))
+                if (claimsMainAudio) {
+                    add(linkedMapOf("resourceID" to 2L, "entity" to 1L, "permanentEntity" to 1L))
+                }
+            }
         val body =
             BinaryPlist.encode(
                 linkedMapOf(
@@ -587,11 +610,7 @@ class AirPlayClient(
                                     linkedMapOf<String, Any?>("appStateID" to 3L, "entity" to 0L),
                                     linkedMapOf<String, Any?>("appStateID" to 1L, "entity" to 0L, "speechMode" to -1L),
                                 ),
-                            "resources" to
-                                listOf(
-                                    linkedMapOf<String, Any?>("resourceID" to 1L, "entity" to 1L, "permanentEntity" to 1L),
-                                    linkedMapOf<String, Any?>("resourceID" to 2L, "entity" to 1L, "permanentEntity" to 1L),
-                                ),
+                            "resources" to resources,
                         ),
                 ),
             )
@@ -603,7 +622,11 @@ class AirPlayClient(
                     body,
                     contentType = "application/x-apple-binary-plist",
                 )
-            log("AIRPLAY: modesChanged（声明持有主屏/主音频资源）[$statusLine]")
+            log(
+                "AIRPLAY: modesChanged（声明持有" +
+                    (if (claimsMainAudio) "主屏/主音频" else "主屏——本次不推音频，不占用音频资源") +
+                    "）[$statusLine]",
+            )
             statusLine.contains("200")
         } catch (error: IOException) {
             log("AIRPLAY: modesChanged 失败 - ${error.message}")
@@ -2565,11 +2588,17 @@ class AirPlayClient(
     private var unmatchedMessages = 0
 
     private fun failAllPending(reason: String) {
-        val waiting = pendingResponses.values.toList()
+        // 用 ConcurrentHashMap.forEach 快照式遍历：`values.toList()` 走的是弱一致迭代器，
+        // 读线程与请求侧并发 remove 时会抛 NoSuchElementException 直接把进程杀掉
+        // （2026-10-21 实车 22:56:57 复现，崩溃线程 airplay-rtsp-reader）。
+        var count = 0
+        pendingResponses.forEach { _, queue ->
+            queue.offer(RTSP_CLOSED_MARK to ByteArray(0))
+            count++
+        }
         pendingResponses.clear()
-        if (waiting.isEmpty()) return
-        log("AIRPLAY: $reason——唤醒 ${waiting.size} 个待响应请求")
-        waiting.forEach { it.offer(RTSP_CLOSED_MARK to ByteArray(0)) }
+        if (count == 0) return
+        log("AIRPLAY: $reason——唤醒 $count 个待响应请求")
     }
 
     private fun startReader(client: Socket) {
