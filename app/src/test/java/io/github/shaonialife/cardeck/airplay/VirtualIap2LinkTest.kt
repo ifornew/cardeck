@@ -317,4 +317,33 @@ class VirtualIap2LinkTest {
         val report = VirtualIap2Link.hidReportFromParams(Iap2Csm.parseParams(body))
         assertEquals(listOf<Byte>(0x08), report?.toList())
     }
+
+    /**
+     * 0xAE00 电源订阅的应答布局回归测试。
+     *
+     * 真机证据（2026-10-22 iPhone↔BMW 蓝牙抓包 + CarDeck 车机日志）：
+     * BMW ID6 的 0xAE00 只订阅 void(6)；iPhone 按订阅参数 ID 一一回传。
+     * 旧布局 param 0/1 不在订阅清单内 → 车机丢弃，电量不显示。
+     * 布局必须含 param 4/5/6（6 = 电量百分比，BMW 唯一采纳的字段）。
+     */
+    @Test
+    fun powerUpdateReplyCarriesSubscribedParams() {
+        val h = Harness()
+        h.link.armMib3()
+        h.car.start(0)
+        h.exchangeUntilNormal()
+        h.carSends(0x1D01, Iap2Csm.string(0, "x"))
+        h.carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
+        h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
+
+        // BMW 形态：只订阅 void(6)
+        assertEquals(listOf(0xAE01), h.carSends(0xAE00, Iap2Csm.param(6, ByteArray(0))))
+
+        val raw = h.lastRawFrameOf(0xAE01)!!
+        val params = Iap2Csm.parseParams(raw.copyOfRange(6, raw.size))
+        assertEquals(listOf(4, 5, 6), params.map { it.id })
+        // 无 batteryContext 时固定 100%：param 4/6 = 电量，param 5 = 充电态 0/1
+        assertEquals(100, params.first { it.id == 6 }.value[0].toInt() and 0xFF)
+        assertTrue(params.first { it.id == 5 }.value[0].toInt() in 0..1)
+    }
 }

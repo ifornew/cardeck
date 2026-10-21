@@ -242,6 +242,9 @@ class Iap2SenderSessionTest {
             send(Iap2MessageIds.MFI_RESPONSE, Iap2Csm.param(0, ByteArray(70) { (it * 7).toByte() }))
             expect(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
 
+            // 0x4E0C 会话 UUID：真机与 0xAA05 同帧（2026-10-22 BMW 抓包），早于 WiFi 交换
+            expect(Iap2MessageIds.DEVICE_UUID_UPDATE)
+
             // 订阅 + StartHID（奥迪形态不发，发送端应直接跳过等待）
             if (!audiDeclarations) {
                 send(Iap2MessageIds.START_NOW_PLAYING_UPDATES)
@@ -270,12 +273,12 @@ class Iap2SenderSessionTest {
                 Iap2Csm.u8(4, 36),
             )
 
-            // 设备状态问候（真机顺序：0x4E0D/0x4E0A/0x4E09/0x4E0B/0x4E0C → 0x4300）
-            expect(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE)
+            // 设备状态问候（2026-10-22 iPhone↔BMW 抓包实测：0x4E0A → 0x4E0B → 0x4E0D → 0x4E09 → 0x4300；
+            // 0x4E0C 已提前到 0xAA05 同帧）
             expect(Iap2MessageIds.DEVICE_LANGUAGE_UPDATE)
-            expect(Iap2MessageIds.DEVICE_INFORMATION_UPDATE)
             expect(Iap2MessageIds.DEVICE_TIME_UPDATE)
-            expect(Iap2MessageIds.DEVICE_UUID_UPDATE)
+            expect(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE)
+            expect(Iap2MessageIds.DEVICE_INFORMATION_UPDATE)
 
             // CarPlay 启动
             expect(Iap2MessageIds.CARPLAY_AVAILABILITY)

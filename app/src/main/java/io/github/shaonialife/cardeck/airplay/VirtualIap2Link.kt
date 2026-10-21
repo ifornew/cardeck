@@ -123,6 +123,13 @@ class VirtualIap2Link(
     /** 已打印的参数明细帧数（只打前几帧，之后按需打动作）。 */
     private var hidReportFrames = 0
 
+    // ---- 电源订阅周期推送（0xAE00/0xAE01）----
+    /** 车机已订阅电源更新（收到 0xAE00 后置位；协议无 StopPowerUpdates，链路存活期内有效）。 */
+    private var powerSubscribed = false
+
+    /** 上一次 0xAE01 发送时刻（[nowMillis] 时钟）。 */
+    private var powerLastSentAtMs = 0L
+
     // ---- MIB3 隧道 MFi 挑战（按车机持久化记忆；与蓝牙链路**独立记**——同一台车
     // 两条链路的认证后端可能不同，实测 MMI 3315 蓝牙认 32B 而 Frida 隧道是 20B） ----
     private var mfiIdentity: String? = null
@@ -148,6 +155,12 @@ class VirtualIap2Link(
                     synchronized(lock) {
                         engine.advanceTime(System.nanoTime() / 1_000_000L)
                         drainLocked()
+                        // 电源订阅的周期续推（节拍即调度器，alive() 为 false 时随线程退出自然停止）。
+                        if (powerSubscribed &&
+                            nowMillis() - powerLastSentAtMs >= POWER_UPDATE_INTERVAL_MILLIS
+                        ) {
+                            sendPowerUpdateLocked("周期")
+                        }
                     }
                 }
             },
@@ -596,20 +609,11 @@ class VirtualIap2Link(
             }
 
             Iap2MessageIds.START_POWER_UPDATES -> {
-                // 车机订阅电源状态 → 回一次 0xAE01（真 iPhone 的应答姿态）。
+                // 车机订阅电源状态 → 立即回一次，之后按周期续推（真 iPhone 的应答姿态）。
                 // xcertplay 发 0xAE00 时订阅 void(4)/void(5)/void(6)；
                 // BMW 车机只订阅 void(6)。旧布局 param 0/1 不在订阅清单内 → 不显示电量。
-                val battery = readBattery()
-                sendCsmLocked(
-                    Iap2MessageIds.POWER_UPDATE,
-                    Iap2Csm.param(0x0004, byteArrayOf(battery.first.toByte())) +
-                        Iap2Csm.param(0x0005, byteArrayOf(if (battery.second) 1 else 0)) +
-                        Iap2Csm.param(0x0006, byteArrayOf(battery.first.toByte())),
-                )
-                log(
-                    "IAPLINK: 车机 0xae00 → 0xae01 电源更新" +
-                        "（电量 ${battery.first}%，${if (battery.second) "充电中" else "未充电"}）",
-                )
+                powerSubscribed = true
+                sendPowerUpdateLocked("订阅应答")
             }
 
             ids.START_HID -> {
@@ -696,6 +700,28 @@ class VirtualIap2Link(
             status == BatteryManager.BATTERY_STATUS_CHARGING ||
                 status == BatteryManager.BATTERY_STATUS_FULL
         return percent.coerceIn(0, 100) to charging
+    }
+
+    /**
+     * 发送一帧 0xAE01 电源更新；调用方须持有 [lock]。
+     *
+     * 周期由 [POWER_UPDATE_INTERVAL_MILLIS] 控制：真 iPhone 的推送也是低频的
+     * （状态栏电量本就不需要秒级刷新）；帧内总是带发送时刻的最新电量，
+     * 因此充电动画/掉电变化最多滞后一个周期，无需单独的变化侦测通路。
+     */
+    private fun sendPowerUpdateLocked(reason: String) {
+        val battery = readBattery()
+        sendCsmLocked(
+            Iap2MessageIds.POWER_UPDATE,
+            Iap2Csm.param(0x0004, byteArrayOf(battery.first.toByte())) +
+                Iap2Csm.param(0x0005, byteArrayOf(if (battery.second) 1 else 0)) +
+                Iap2Csm.param(0x0006, byteArrayOf(battery.first.toByte())),
+        )
+        powerLastSentAtMs = nowMillis()
+        log(
+            "IAPLINK: 0xae01 电源更新[$reason]" +
+                "（电量 ${battery.first}%，${if (battery.second) "充电中" else "未充电"}）",
+        )
     }
 
     /**
@@ -878,6 +904,9 @@ class VirtualIap2Link(
 
         /** 同一按键持续按住多久才允许再次触发（模拟长按连发，短按绝不重复）。 */
         const val HID_HOLD_REPEAT_MILLIS = 1_500L
+
+        /** 0xAE01 电源更新的周期推送间隔（车机状态栏刷新粒度，低频即可）。 */
+        const val POWER_UPDATE_INTERVAL_MILLIS = 30_000L
 
         /**
          * 0x6802 的参数表 → HID 报文。

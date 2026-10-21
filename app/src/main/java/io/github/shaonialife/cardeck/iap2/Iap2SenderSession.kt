@@ -210,6 +210,11 @@ class Iap2SenderSession(
         send(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
         log("iap2 tx=0xaa05 authentication-succeeded（自报）")
 
+        // 0x4E0C 会话 UUID：真 iPhone 与 0xAA05 同帧发出（2026-10-22 iPhone↔BMW 蓝牙抓包
+        // 实测：aa05+4e0c+5702 同帧），早于 WiFi 配置交换——不放问候批里。
+        send(Iap2MessageIds.DEVICE_UUID_UPDATE, Iap2Csm.string(0, deviceUuid()))
+        log("iap2 tx=0x4e0c 会话 UUID（紧随 0xaa05，对齐真机）")
+
         // ---- EA 会话启动（MFi 认证完成后）----
         // 奥迪 0x1D01 声明 de.audi.mmicconnectdatatransfer / com.audi.cpp.eadata0/1
         // 三个 EA 协议；触摸 HID 相关数据经 EA 会话。认证前发送会噎死 DiPlay（见上）。
@@ -264,11 +269,11 @@ class Iap2SenderSession(
                 }
             }
 
-        // ---- 设备状态问候（对照真 iPhone 实录：0x4E0D/0x4E0A/0x4E09/0x4E0B → 0x4300）----
+        // ---- 设备状态问候（2026-10-22 iPhone↔BMW 蓝牙抓包实测顺序：
+        // 0x5703 拿到凭证之后 → 0x4E0A 语言 → 0x4E0B 时间 → 0x4E0D CarPlay 状态 → 0x4E09 设备名；
+        // 0x4E0C 已提前到 0xAA05 同帧，不在本批）----
         // Audi MIB3 实测：缺这批消息时，车机对 0x4300 只回链路 ACK、不出 0x4301。
-        send(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE, Iap2Csm.u8(0, 1))
         send(Iap2MessageIds.DEVICE_LANGUAGE_UPDATE, Iap2Csm.string(0, "zh-CN"))
-        send(Iap2MessageIds.DEVICE_INFORMATION_UPDATE, Iap2Csm.string(0, deviceName))
         val epochSeconds = System.currentTimeMillis() / 1000L
         val timezoneMinutes =
             java.util.TimeZone
@@ -280,12 +285,10 @@ class Iap2SenderSession(
                 Iap2Csm.u16(1, timezoneMinutes and 0xFFFF) +
                 Iap2Csm.u8(2, 0),
         )
-        send(
-            Iap2MessageIds.DEVICE_UUID_UPDATE,
-            Iap2Csm.string(0, deviceUuid()),
-        )
+        send(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE, Iap2Csm.u8(0, 1))
+        send(Iap2MessageIds.DEVICE_INFORMATION_UPDATE, Iap2Csm.string(0, deviceName))
         log(
-            "iap2 tx=0x4e0d/0x4e0a/0x4e09/0x4e0b/0x4e0c 设备状态问候" +
+            "iap2 tx=0x4e0a/0x4e0b/0x4e0d/0x4e09 设备状态问候（真机顺序）" +
                 "（name=$deviceName mac=$bluetoothMac）",
         )
 
