@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 单页图标网格（列数固定 4；行数由代码按横竖屏设置——横屏 CarPlay 规格 3 行、
-     竖屏自适应至多 6 行，避免固定 3 行把格子拉成瘦高条；格子尺寸由代码按屏幕计算） -->
+<!-- 单页图标网格（columnCount/rowCount 由 GridActivity.computeCellMetrics 按屏幕自适应
+     覆盖：使格子高宽比接近 1.25，宽屏多列、窄屏多行；格子尺寸由代码按屏幕计算） -->
 <GridLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"

@@ -17,6 +17,7 @@ import androidx.viewpager2.widget.ViewPager2
 import io.github.shaonialife.cardeck.R
 import io.github.shaonialife.cardeck.media.MediaSessionsState
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
+import io.github.shaonialife.cardeck.render.SPLIT_MAP_WIDTH_RATIO
 import io.github.shaonialife.cardeck.ui.WallpaperStore
 import io.github.shaonialife.cardeck.util.Bg
 
@@ -48,8 +49,9 @@ class GridActivity : AppCompatActivity() {
     private var cellHeightPx = 0
     private var iconSizePx = 0
 
-    /** 当前行数（横屏 3；竖屏按格子高宽比自适应，分页容量 = COLUMNS × rows）。 */
+    /** 当前行数 / 列数（按屏幕尺寸自适应，分页容量 = columns × rows）。 */
     private var rows = ROWS_MIN
+    private var columns = COLUMNS_DEFAULT
 
     /** 应用清单缓存（每次 resume 重扫 packageManager 会拖慢回桌面——仅在首次载入时扫描）。 */
     private var appsCache: List<VirtualLauncher.AppEntry>? = null
@@ -80,6 +82,9 @@ class GridActivity : AppCompatActivity() {
     /** 卡片视觉（暗幕透明度/模糊）——与 dock 一致（DockPrefs）。 */
     private val dockPrefsListener = {
         runOnUiThread {
+            VirtualLauncher.refreshSplitRatio()
+            // 仅重绑 position 0（仪表盘音乐卡），full reload 太贵（重扫 app + 重建网格）
+            if (VirtualLauncher.dashboardMode) pager?.adapter?.notifyItemChanged(0)
             applyDashCardChrome()
             refreshDashWallpaper()
         }
@@ -312,6 +317,7 @@ class GridActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        DockPrefs.syncRatio(this) // 冷启动时把持久化的 splitRatio 加载到全局变量（SPLIT_MAP_WIDTH_RATIO）
         setContentView(R.layout.activity_grid)
 
         // 格子尺寸/行数按屏幕动态计算（布局关系在 XML，尺寸测量在代码）
@@ -456,12 +462,11 @@ class GridActivity : AppCompatActivity() {
     }
 
     /**
-     * 计算格子尺寸与行数：
-     * 横屏（CarPlay 规格）：固定 4 列 × 3 行，行为与此前一致。
-     * 竖屏：固定 3 行会把格子拉成 ~1:2.5 的瘦高条（图标只占三成、满屏空框，
-     * 2026-10-17 用户开「显示布局边界」截图暴露）；按「格子高 ≈ 宽 × 1.25」
-     * 自适应加行（上限 6，对齐 iPhone 竖屏主屏 4×6 的观感），图标尺寸同步
-     * 跟随格子宽，避免格子过大/图标过小的比例失衡。
+     * 计算格子尺寸与列/行数（自动适配）：
+     * 在 [COLUMNS_MIN, COLUMNS_MAX] × [ROWS_MIN, ROWS_MAX] 里搜索，使格子高宽比最接近
+     * CELL_HEIGHT_RATIO（1.25）；同等偏差下取容量更大的一组（少留白）。
+     * 原来横屏固定 4 列 × 3 行，宽屏上格子被拉成扁平条、图标显得小；自动适配后
+     * 宽屏会自然多出几列，竖屏则多出行。图标尺寸跟随格子宽高取小值，避免比例失衡。
      */
     private fun computeCellMetrics() {
         val dm = resources.displayMetrics
@@ -476,18 +481,39 @@ class GridActivity : AppCompatActivity() {
             iconSizePx = 0
             return
         }
-        cellWidthPx = usableW / COLUMNS
-        // 横竖屏统一：先按 3 行试算，格子过高（竖屏）时加行收敛到目标比例
-        var rowCount = ROWS_MIN
-        if (cellWidthPx > 0) {
-            rowCount = (usableH / (cellWidthPx * CELL_HEIGHT_RATIO)).toInt().coerceIn(ROWS_MIN, ROWS_MAX)
+        val minCellPx = (MIN_CELL_SIZE_DP * density).toInt()
+        var bestColumns = COLUMNS_DEFAULT
+        var bestRows = ROWS_MIN
+        var bestScore = Float.MAX_VALUE
+        for (c in COLUMNS_MIN..COLUMNS_MAX) {
+            val cw = usableW / c
+            if (cw < minCellPx) continue
+            for (r in ROWS_MIN..ROWS_MAX) {
+                val ch = usableH / r
+                if (ch < minCellPx) continue
+                val score = kotlin.math.abs(ch.toFloat() / cw.toFloat() - CELL_HEIGHT_RATIO)
+                val better =
+                    score < bestScore - 1e-4f ||
+                        (kotlin.math.abs(score - bestScore) <= 1e-4f && c * r > bestColumns * bestRows)
+                if (better) {
+                    bestScore = score
+                    bestColumns = c
+                    bestRows = r
+                }
+            }
         }
-        rows = rowCount
-        cellHeightPx = usableH / rowCount
+        columns = bestColumns
+        rows = bestRows
+        cellWidthPx = usableW / columns
+        cellHeightPx = usableH / rows
         iconSizePx =
             (cellHeightPx * 0.63f)
                 .toInt()
                 .coerceAtMost((cellWidthPx * 0.72f).toInt())
+        VirtualLauncher.logSink?.invoke(
+            "GRID: 自适应 ${columns}列×${rows}行（每页 ${columns * rows} 个）" +
+                " 屏=${dm.widthPixels}×${dm.heightPixels}@${dm.densityDpi}dpi",
+        )
     }
 
     /** 重新读取应用清单与桌面选择（首帧与每次回到桌面时调用）。 */
@@ -513,7 +539,7 @@ class GridActivity : AppCompatActivity() {
                 apps.filter { it.component.flattenToString() in selected }.forEach { add(Cell.App(it)) }
             }
         // 第 0 页 = 仪表盘，其后为桌面网格页：左右滑动即互相切换
-        pages = listOf(listOf<Cell>(Cell.Dashboard)) + cells.chunked(COLUMNS * rows)
+        pages = listOf(listOf<Cell>(Cell.Dashboard)) + cells.chunked(columns * rows)
 
         val current = pager?.currentItem ?: 0
         pager?.adapter?.notifyDataSetChanged()
@@ -539,8 +565,8 @@ class GridActivity : AppCompatActivity() {
                 DashboardHolder(layoutInflater.inflate(R.layout.view_dashboard, parent, false))
             } else {
                 val grid = layoutInflater.inflate(R.layout.item_grid_page, parent, false) as GridLayout
-                grid.columnCount = COLUMNS
-                // 行数由 computeCellMetrics 按横竖屏决定（横屏 3、竖屏最多 6）
+                grid.columnCount = columns
+                // 行数由 computeCellMetrics 按屏幕自适应（宽容许多列、窄屏多行）
                 grid.rowCount = rows
                 PageHolder(grid)
             }
@@ -564,6 +590,10 @@ class GridActivity : AppCompatActivity() {
             dashboardView = panel
             val scale = VirtualLauncher.gridScale()
             val cardMargin = (CARD_MARGIN_PX * scale).toInt()
+            // 底部页点占位：与地图卡共用同一契约（VirtualLauncher.dotsBandStreamPx，流坐标 × 倍率）。
+            // 卡片底边原来固定 cardMargin(≈16px)，页点顶边在 14dp，二者视觉上会叠一起。
+            val dotsBandPx = (VirtualLauncher.dotsBandStreamPx() * scale).toInt()
+            val bottomInset = maxOf(cardMargin, dotsBandPx)
             panel.layoutParams =
                 android.view.ViewGroup
                     .MarginLayoutParams(
@@ -575,16 +605,16 @@ class GridActivity : AppCompatActivity() {
                             leftMargin = cardMargin
                             rightMargin = cardMargin
                             topMargin = cardMargin * 2 + (VirtualLauncher.mapTileHeight * scale).toInt()
-                            bottomMargin = cardMargin
+                            bottomMargin = bottomInset
                         } else {
-                            // 横屏：左缘 = 应用区中线 + 半边距（8）：与地图 tile 右缘
-                            // （中线-8）之间形成 16px 中缝。显式按中线算，勿引用
-                            // mapTileWidth（语义已变）
+                            // 横屏：音乐卡左缘 = 地图 tile 右缘 + CARD_MARGIN_PX(16) 中缝。
+                            // 合成器 tileW = appAreaW * RATIO - 24（左缘 16 + 右缘半距 8），
+                            // tile 右缘 = appAreaW * RATIO - 8；音乐卡左缘 = 右缘 + 16 = appAreaW * RATIO + 8。
                             leftMargin =
-                                ((VirtualLauncher.appAreaWidth / 2 + CARD_MARGIN_PX / 2) * scale).toInt()
+                                ((VirtualLauncher.appAreaWidth * SPLIT_MAP_WIDTH_RATIO + CARD_MARGIN_PX / 2) * scale).toInt()
                             topMargin = cardMargin
                             rightMargin = cardMargin
-                            bottomMargin = cardMargin
+                            bottomMargin = bottomInset
                         }
                     }
             panel.outlineProvider =
@@ -735,15 +765,21 @@ class GridActivity : AppCompatActivity() {
     override fun onBackPressed() = Unit // 桌面不退出
 
     private companion object {
-        const val COLUMNS = 4 // CarPlay 规格：强制 4 列
+        /** 默认列数（搜索无解时的兜底；CarPlay 横屏常见解为 4–8 列）。 */
+        const val COLUMNS_DEFAULT = 4
 
-        /** 横屏 CarPlay 规格行数（竖屏自适应时用作下限）。 */
+        /** 自动适配：列数搜索范围。 */
+        const val COLUMNS_MIN = 3
+        const val COLUMNS_MAX = 8
+
+        /** 自动适配：行数搜索范围。 */
         const val ROWS_MIN = 3
+        const val ROWS_MAX = 8
 
-        /** 竖屏自适应行数上限（对齐 iPhone 竖屏主屏 4×6 的观感）。 */
-        const val ROWS_MAX = 6
+        /** 格子最小边长（dp）：低于此值图标+标签会挤成一团，搜索时跳过该组合。 */
+        const val MIN_CELL_SIZE_DP = 72
 
-        /** 格子目标高宽比（高/宽）：竖屏加行的收敛目标。 */
+        /** 格子目标高宽比（高/宽）：搜索时最接近此比例的组合胜出。 */
         const val CELL_HEIGHT_RATIO = 1.25f
     }
 }

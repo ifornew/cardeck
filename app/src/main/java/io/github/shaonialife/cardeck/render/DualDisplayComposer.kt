@@ -26,6 +26,23 @@ import java.util.concurrent.atomic.AtomicBoolean
 const val CARD_MARGIN_PX = 16
 
 /**
+ * 横屏仪表盘分屏比例：地图 tile 占应用区宽度的比例（音乐卡占剩余 1-RATIO）。
+ * 三方统一契约：本类 SPLIT 绘制、VirtualLauncher 建屏 tile 尺寸、GridActivity 音乐卡 leftMargin。
+ * 0.50 等宽 50/50；0.58 地图略宽；0.75 当前用户偏好。
+ * 非 const + @Volatile：DockPrefs 动态更新，GL 线程读最新值（composer 每帧重绘时读一次）。
+ */
+@Volatile
+var SPLIT_MAP_WIDTH_RATIO = 0.75f
+
+/**
+ * 横屏 SPLIT 时地图卡片底边距（流坐标 px）。默认 CARD_MARGIN_PX；
+ * VirtualLauncher 会在建屏后按「底部页点占位」（页点距底 8dp + 点径 6dp + 间隙 6dp）
+ * 把底部内缩调大，避免页点压在卡片底边。顶部边距仍固定 CARD_MARGIN_PX。
+ */
+@Volatile
+var MAP_TILE_BOTTOM_INSET_PX = CARD_MARGIN_PX.toFloat()
+
+/**
  * 双虚拟屏 GL 合成器：dock 屏 + 应用屏（原生 / 超采样两块，按活动切换）→ 拼接输出到编码器输入 Surface。
  *
  * 三路 SurfaceTexture 作为各虚拟屏的输出；GL 线程轮询新帧标志，有新帧即重绘合成画面。
@@ -602,17 +619,17 @@ class DualDisplayComposer(
                         drawInput(map!!, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
                     } else {
                         // 卡片形态：四周留边 + 圆角（与音乐卡一致）。
-                        // 中缝=CARD_MARGIN_PX（16）：tile 右缘与音乐卡左缘各收半边距（8），
-                        // 否则两边各 16px 叠加出 32px 的中缝、比外侧 16px 边距宽一倍不协调。
+                        // 横屏分屏比例由 SPLIT_MAP_WIDTH_RATIO 控制（地图更宽、音乐卡更窄，默认 58/42）。
                         // tileSlideFraction：随 pager 滑动把 tile 平移出/入左侧（视觉跟手）。
-                        val half = (outWidth - dockW) / 2f
-                        val tileW = half - CARD_MARGIN_PX - CARD_MARGIN_PX / 2f
-                        val slide = tileSlideFraction * (outWidth - dockW)
+                        val appAreaW = outWidth - dockW
+                        val tileW = appAreaW * SPLIT_MAP_WIDTH_RATIO - CARD_MARGIN_PX - CARD_MARGIN_PX / 2f
+                        val slide = tileSlideFraction * appAreaW
                         drawInputUV(
                             map!!,
                             dockW + CARD_MARGIN_PX - slide,
                             dockW + CARD_MARGIN_PX + tileW - slide,
-                            CARD_MARGIN_PX.toFloat(),
+                            // GL 坐标 y=0 在**下边**：底边内缩加在 y0，顶部仍留 CARD_MARGIN_PX
+                            MAP_TILE_BOTTOM_INSET_PX,
                             (outHeight - CARD_MARGIN_PX).toFloat(),
                             cornerRadius = TILE_CORNER_RADIUS,
                         )

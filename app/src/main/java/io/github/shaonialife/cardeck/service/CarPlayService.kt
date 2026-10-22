@@ -59,24 +59,38 @@ class CarPlayService : Service() {
         flags: Int,
         startId: Int,
     ): Int {
-        // 必须显式指定类型为 connectedDevice：
-        // 2 参 startForeground 会拾取 manifest 声明的全部类型（含 mediaProjection），
-        // 而 Android 14 启动 mediaProjection 类型要求 AppOps PROJECT_MEDIA（用户当次授权才有效）——
-        // 重启/授权过期后直接 SecurityException 崩溃（2026-10-09 实测踩坑）。
-        androidx.core.app.ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            buildNotification(),
-            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
-        )
-        acquireLocks()
-        // 授权结果在（用户刚确认投屏）时：升级前台类型再创建投影（try/catch 兜底不崩）
-        if (pendingProjectionResult != null) {
-            upgradeToProjection()
-            takeProjection()
-        } else if (mediaProjection != null) {
-            upgradeToProjection()
+        // 前台类型必须一次定对，不能「先报 connectedDevice 再 upgrade」：
+        // 每次「启动连接」都会 startService 进来，若这里只报 connectedDevice，
+        // 服务先前持有的 mediaProjection 前台类型会被摘掉，系统随即停止投影（onStop）。
+        // 2026-10-21 真车日志正是这个时序：06:28:32.216 选「开启声音」→ .272 就
+        // `MediaProjection 被系统停止`，于是音频拿不到投影、UI 从「已授权」翻回
+        // 「未授权」，每次都得手动重新授权。
+        // 但也不能无条件带 mediaProjection：Android 14 上该类型要求 AppOps
+        // PROJECT_MEDIA（用户当次授权才有效），授权过期/进程重启后会 SecurityException
+        // （2026-10-09 踩坑）。所以按「当前是否持有/待创建投影」决定。
+        val needsProjection = pendingProjectionResult != null || mediaProjection != null
+        val types =
+            if (needsProjection) {
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            } else {
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            }
+        try {
+            androidx.core.app.ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), types)
+        } catch (error: Exception) {
+            // 带 mediaProjection 类型被拒（授权已失效）：退回仅 connectedDevice，待重新授权
+            fileLog("SVC: startForeground(types=$types) 失败 - ${error.message}，退回仅 connectedDevice")
+            androidx.core.app.ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                buildNotification(),
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+            )
         }
+        acquireLocks()
+        // 授权结果在（用户刚确认投屏）时创建投影
+        if (pendingProjectionResult != null) takeProjection()
         return START_STICKY
     }
 
@@ -106,20 +120,6 @@ class CarPlayService : Service() {
             }
         } catch (error: Exception) {
             fileLog("SVC: getMediaProjection 失败 - ${error.message ?: error.javaClass.simpleName}")
-        }
-    }
-
-    private fun upgradeToProjection() {
-        try {
-            androidx.core.app.ServiceCompat.startForeground(
-                this,
-                NOTIFICATION_ID,
-                buildNotification(),
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
-            )
-        } catch (error: Exception) {
-            fileLog("SVC: 升级 mediaProjection FGS 类型失败 - ${error.message}")
         }
     }
 

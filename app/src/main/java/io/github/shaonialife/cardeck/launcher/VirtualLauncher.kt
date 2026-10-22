@@ -15,7 +15,9 @@ import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
 import io.github.shaonialife.cardeck.media.NotificationAccess
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
 import io.github.shaonialife.cardeck.render.DualDisplayComposer
+import io.github.shaonialife.cardeck.render.MAP_TILE_BOTTOM_INSET_PX
 import io.github.shaonialife.cardeck.render.OverlayCard
+import io.github.shaonialife.cardeck.render.SPLIT_MAP_WIDTH_RATIO
 import io.github.shaonialife.cardeck.shizuku.CarInputClient
 import io.github.shaonialife.cardeck.shizuku.Shell
 import io.github.shaonialife.cardeck.shizuku.ShizukuGate
@@ -52,6 +54,9 @@ object VirtualLauncher {
 
     /** letterbox 窗口的目标逻辑宽度（dp）：≈ 手机屏宽，触发电商类应用的紧凑手机布局。 */
     private const val LETTERBOX_TARGET_DP = 410f
+
+    /** 底部页点占位（dp）：距底 8 + 点径 6 + 与卡片间隙 6；卡片底边据此内缩。 */
+    private const val DOTS_BAND_DP = 20f
 
     /**
      * 横屏应用屏超采样倍率（固定像素占位缩小的唯一杠杆，见 attach 注释）。
@@ -191,6 +196,16 @@ object VirtualLauncher {
     @Volatile
     var appAreaHeight: Int = 0
         private set
+
+    /** 桌面所在屏的原生密度（attach 时记录；用于把 dp 换算成流坐标 px）。 */
+    @Volatile
+    private var gridDpi: Int = 160
+
+    /**
+     * 底部页点占位（流坐标 px）= 页点距底 8dp + 点径 6dp + 与卡片间隙 6dp。
+     * 横屏地图卡片底边与仪表盘音乐卡底边都按此内缩，避免页点压在卡片上。
+     */
+    fun dotsBandStreamPx(): Int = (DOTS_BAND_DP * gridDpi / 160f).toInt()
 
     @Volatile
     var mapFullscreen: Boolean = false
@@ -377,8 +392,11 @@ object VirtualLauncher {
             mapTileWidth = appWidth - CARD_MARGIN_PX * 2
             mapTileHeight = (appHeightPx - CARD_MARGIN_PX * 3) / 2
         } else {
-            mapTileWidth = appWidth / 2 - CARD_MARGIN_PX * 3 / 2
-            mapTileHeight = appHeightPx - CARD_MARGIN_PX * 2
+            // 横屏：地图 tile 宽度按 SPLIT_MAP_WIDTH_RATIO（默认 0.75，地图更宽），音乐卡占剩余。
+            // 边距与中缝规则同合成器：tile 左缘 16，右缘=tileW-16-8（右缘收半边距 8），
+            // 音乐卡左缘=应用区左缘+tileW-8，与 tile 右缘之间形成 16px 中缝。
+            mapTileWidth = (appWidth * SPLIT_MAP_WIDTH_RATIO).toInt() - CARD_MARGIN_PX * 3 / 2
+            // 高度需等密度算出后按底部页点占位重算（见下方 gridDpi 处）
         }
         // 横屏应用屏的密度选择（2026-10-11 实测标定）：
         // 竖屏锁定应用（如头条）在横屏屏上被系统 letterbox 成窄条窗口，窗口逻辑宽度
@@ -416,6 +434,15 @@ object VirtualLauncher {
             } else {
                 appPortraitDensity
             }
+        gridDpi = appNativeDensity
+        // 底部页点占位：横屏地图卡底边内缩到页点之上（原 16px 会让页点压在卡片底缘）。
+        // 竖屏地图卡在上半区，不受影响。
+        if (!dockAtBottom) {
+            MAP_TILE_BOTTOM_INSET_PX = dotsBandStreamPx().toFloat()
+            mapTileHeight = appHeightPx - CARD_MARGIN_PX - dotsBandStreamPx()
+        } else {
+            MAP_TILE_BOTTOM_INSET_PX = CARD_MARGIN_PX.toFloat()
+        }
 
         // 等待 Shizuku UserService 绑定（受信虚拟屏需要 shell 权限创建）
         var svc = CarInputClient.service
@@ -878,6 +905,22 @@ object VirtualLauncher {
         syncDashboard(false)
         goGrid()
         logSink?.invoke("LAUNCHER: 桌面模式（图标网格）")
+    }
+
+    /**
+     * 仪表盘分屏比例（地图/音乐卡）变更后重算 tile 尺寸 + 动态 resize 地图屏。
+     * DockPrefs 滑条拖动触发；竖屏（dockAtBottom）横屏切竖屏时不影响。
+     */
+    fun refreshSplitRatio() {
+        if (dockAtBottom || mapDisplayId < 0) return
+        val newTileW = (appAreaWidth * SPLIT_MAP_WIDTH_RATIO).toInt() - CARD_MARGIN_PX * 3 / 2
+        if (newTileW == mapTileWidth) return
+        mapTileWidth = newTileW
+        mapTileHeight = appHeightPx - CARD_MARGIN_PX - (MAP_TILE_BOTTOM_INSET_PX).toInt()
+        if (!mapFullscreen) {
+            Bg.run("resize-map-after-split") { resizeMapDisplay(fullscreen = false) }
+        }
+        logSink?.invoke("LAUNCHER: 分屏比例 → ${(SPLIT_MAP_WIDTH_RATIO * 100).toInt()}%（tileW=$newTileW）")
     }
 
     /**

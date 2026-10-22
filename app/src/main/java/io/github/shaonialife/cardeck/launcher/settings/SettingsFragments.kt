@@ -437,6 +437,8 @@ class DockPanelFragment : SettingsPanelFragment() {
         val scrimValue = view.findViewById<TextView>(R.id.dockScrimValue)
         val blurSeek = view.findViewById<SeekBar>(R.id.dockBlurSeek)
         val blurValue = view.findViewById<TextView>(R.id.dockBlurValue)
+        val splitSeek = view.findViewById<SeekBar>(R.id.dockSplitSeek)
+        val splitValue = view.findViewById<TextView>(R.id.dockSplitValue)
 
         scrimSeek.progress =
             DockPrefs
@@ -476,6 +478,28 @@ class DockPanelFragment : SettingsPanelFragment() {
                     blurValue.text = "$value%"
                     DockPrefs
                         .setBlur(requireContext(), value)
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+
+                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            },
+        )
+
+        // 仪表盘分屏比例：SeekBar 范围 0..30 映射到 50..80%（DockPrefs.splitRatio 存真实百分比）
+        splitSeek.progress = DockPrefs.splitRatio(requireContext()) - 50
+        splitValue.text = "${DockPrefs.splitRatio(requireContext())}%"
+        splitSeek.setOnSeekBarChangeListener(
+            object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(
+                    seekBar: SeekBar?,
+                    value: Int,
+                    fromUser: Boolean,
+                ) {
+                    if (!fromUser) return
+                    val percent = value + 50
+                    splitValue.text = "$percent%"
+                    DockPrefs.setSplitRatio(requireContext(), percent)
                 }
 
                 override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
