@@ -18,6 +18,14 @@ object DockPrefs {
     private const val KEY_SCRIM = "dockScrimOpacity"
     private const val KEY_BLUR = "dockBlur"
     private const val KEY_SPLIT = "dockSplitRatio"
+    private const val KEY_NAV_HOME = "navHomeAddress"
+    private const val KEY_NAV_WORK = "navWorkAddress"
+    private const val KEY_NAV_APP = "navMapApp"
+
+    /** 导航地图 App 选择值（KEY_NAV_APP）。 */
+    const val NAV_APP_AMAP = "amap"
+
+    const val NAV_APP_BAIDU = "baidu"
 
     /** 暗幕强度默认值（%）。 */
     const val DEFAULT_SCRIM = 20
@@ -77,6 +85,36 @@ object DockPrefs {
     /** 进程启动时调用：把持久化的 splitRatio 同步到 DualDisplayComposer 全局变量。 */
     fun syncRatio(context: Context) {
         SPLIT_MAP_WIDTH_RATIO = splitRatio(context) / 100f
+    }
+
+    /** 导航快捷入口：家地址（空串=未设置）。 */
+    fun navHomeAddress(context: Context): String = prefs(context).getString(KEY_NAV_HOME, "") ?: ""
+
+    /** 导航快捷入口：单位地址（空串=未设置）。 */
+    fun navWorkAddress(context: Context): String = prefs(context).getString(KEY_NAV_WORK, "") ?: ""
+
+    /** 导航地图 App（NAV_APP_AMAP / NAV_APP_BAIDU；默认高德）。 */
+    fun navMapApp(context: Context): String = prefs(context).getString(KEY_NAV_APP, NAV_APP_AMAP) ?: NAV_APP_AMAP
+
+    fun setNavHomeAddress(
+        context: Context,
+        value: String,
+    ) {
+        prefs(context).edit().putString(KEY_NAV_HOME, value.trim()).apply()
+    }
+
+    fun setNavWorkAddress(
+        context: Context,
+        value: String,
+    ) {
+        prefs(context).edit().putString(KEY_NAV_WORK, value.trim()).apply()
+    }
+
+    fun setNavMapApp(
+        context: Context,
+        value: String,
+    ) {
+        prefs(context).edit().putString(KEY_NAV_APP, value).apply()
     }
 
     private fun notifyListeners() {

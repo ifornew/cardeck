@@ -184,6 +184,13 @@ class Iap2LinkEngine(
      */
     private var declaredMaxOutgoing = maxOutgoing
 
+    /**
+     * 收到对端 marker（`FF 55 02 00 EE 10`）时回一个 marker——真 iPhone 的行为
+     * （iPhone 抓包：车机 marker → 手机 marker → 车机 SYN）。仅应答者模式开启：
+     * 发起方模式下 marker 只是握手开场，主动重发已由 [start]/[initiate] 负责。
+     */
+    var echoMarker = false
+
     /** 进入协商：发 marker + 同步包（发送端=发起方，不等待对端 marker）。 */
     fun start(nowMillis: Long) {
         if (state != State.IDLE) return
@@ -339,10 +346,17 @@ class Iap2LinkEngine(
     // ---- 接收解析 ----
 
     private fun parseAvailable(nowMillis: Long): Boolean {
-        // 丢弃帧头前的杂字节（含对端 marker FF55…）
+        // 丢弃帧头前的杂字节（含对端 marker FF55…）；应答者模式下顺手回 marker
         while (receive.size >= 2 &&
             !(receive[0] == 0xFF.toByte() && receive[1] == 0x5A.toByte())
         ) {
+            if (echoMarker && state == State.NEGOTIATING && receive.size >= MARKER.size &&
+                (0 until MARKER.size).all { receive[it] == MARKER[it] }
+            ) {
+                receive.discard(MARKER.size)
+                appendOutput(MARKER)
+                continue
+            }
             receive.discard(1)
         }
         if (receive.size < HEADER_BYTES) return false

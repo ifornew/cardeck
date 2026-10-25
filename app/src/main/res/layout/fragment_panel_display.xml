@@ -100,13 +100,41 @@
             android:textColor="#FF8E8E93"
             android:textSize="13sp"
             android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/btnFps90"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="2dp"
+            android:paddingLeft="18dp"
+            android:paddingTop="6dp"
+            android:paddingRight="18dp"
+            android:paddingBottom="6dp"
+            android:text="90 fps"
+            android:textColor="#FF8E8E93"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/btnFps120"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="2dp"
+            android:paddingLeft="18dp"
+            android:paddingTop="6dp"
+            android:paddingRight="18dp"
+            android:paddingBottom="6dp"
+            android:text="120 fps"
+            android:textColor="#FF8E8E93"
+            android:textSize="13sp"
+            android:textStyle="bold" />
     </LinearLayout>
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="6dp"
-        android:text="连接中切换实时生效；英雄卡实时显示「实际/目标」帧率"
+        android:text="连接中切换实时生效；英雄卡实时显示「实际/目标」帧率。90/120 fps 为实验档：实际帧率取决于编码器余量，功耗发热更高"
         android:textColor="#FF8E8E93"
         android:textSize="12sp" />
 

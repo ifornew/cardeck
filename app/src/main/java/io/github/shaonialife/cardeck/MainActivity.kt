@@ -1651,28 +1651,11 @@ class MainActivity : AppCompatActivity() {
                 // 先关弹窗再提示：snackbar 在 Activity 窗口内，弹窗未关时会被盖住
                 dialog.dismiss()
                 setTarget(device, name)
-                // 「只配对、不连接」：系统/车机在配对完成后常会自动建立 HFP/A2DP
-                // 连接，而奥迪实测这种「已连接」状态会让车机拒绝 CarPlay。立即与
-                // 1.5s 后各断一次（车机侧重连通常在这两个时间点之间发生）。
-                val app = applicationContext
-                Bg.run("bt-pair-only") {
-                    repeat(2) { attempt ->
-                        val dropped = BtProfiles.disconnect(app, device)
-                        if (dropped.isNotEmpty()) {
-                            log(
-                                "BT-PAIR: 已断开配对后自动建立的 ${dropped.joinToString("/")} 连接" +
-                                    "（保持仅配对，避免车机拒绝 CarPlay）",
-                            )
-                        }
-                        if (attempt == 0) {
-                            try {
-                                Thread.sleep(1_500)
-                            } catch (_: InterruptedException) {
-                                return@run
-                            }
-                        }
-                    }
-                }
+                // 不再在配对完成后立刻断开自动建立的 HFP/A2DP：真车（BMW 82772）要在
+                // **HFP 完成 SLC 之后**才 SDP 查询并回连手机 …cafe，秒断等于掐掉触发窗口
+                // （2026-10-24 实车：19:10:25 正是这条把刚建好的 HFP 断掉）。
+                // 奥迪那种「已连接时车机不开窗口」的场景由 Iap2BluetoothClient 的宽限兜底
+                // 处理（宽限期内保持在线等回连，超时才断开并主动拨 …caff）。
             }
 
             BluetoothDevice.BOND_NONE -> {

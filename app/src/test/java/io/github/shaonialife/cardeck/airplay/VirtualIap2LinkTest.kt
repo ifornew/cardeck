@@ -319,12 +319,12 @@ class VirtualIap2LinkTest {
     }
 
     /**
-     * 0xAE00 电源订阅的应答布局回归测试。
+     * 0xAE00 电源订阅的应答布局回归测试（2026-10-23 起为**订阅驱动**）。
      *
-     * 真机证据（2026-10-22 iPhone↔BMW 蓝牙抓包 + CarDeck 车机日志）：
-     * BMW ID6 的 0xAE00 只订阅 void(6)；iPhone 按订阅参数 ID 一一回传。
-     * 旧布局 param 0/1 不在订阅清单内 → 车机丢弃，电量不显示。
-     * 布局必须含 param 4/5/6（6 = 电量百分比，BMW 唯一采纳的字段）。
+     * 真机证据（2026-10-22 iPhone↔BMW 蓝牙抓包 + CarDeck 车机日志 + WinPlay 对照组）：
+     * BMW ID6 的 0xAE00 只订阅 void(6)，WinPlay 订 void(3/4/5)；
+     * iPhone 严格「订什么回什么」，按订阅参数 ID 一一回传。
+     * 应答只带订阅内参数——订阅外参数可能导致对端丢弃整帧。
      */
     @Test
     fun powerUpdateReplyCarriesSubscribedParams() {
@@ -336,14 +336,42 @@ class VirtualIap2LinkTest {
         h.carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
         h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
 
-        // BMW 形态：只订阅 void(6)
+        // BMW 形态：只订阅 void(6) → 应答只含 param 6
         assertEquals(listOf(0xAE01), h.carSends(0xAE00, Iap2Csm.param(6, ByteArray(0))))
 
         val raw = h.lastRawFrameOf(0xAE01)!!
         val params = Iap2Csm.parseParams(raw.copyOfRange(6, raw.size))
-        assertEquals(listOf(4, 5, 6), params.map { it.id })
-        // 无 batteryContext 时固定 100%：param 4/6 = 电量，param 5 = 充电态 0/1
+        assertEquals("订阅驱动：只回订阅内的 param 6", listOf(6), params.map { it.id })
+        // 无 batteryContext 时固定 100%
         assertEquals(100, params.first { it.id == 6 }.value[0].toInt() and 0xFF)
+    }
+
+    /** WinPlay 形态：订 3/4/5 → 应答含且仅含 3/4/5（param3=u16，与 iPhone 对照组一致）。 */
+    @Test
+    fun powerUpdateReplyFollowsWinPlaySubscription() {
+        val h = Harness()
+        h.link.armMib3()
+        h.car.start(0)
+        h.exchangeUntilNormal()
+        h.carSends(0x1D01, Iap2Csm.string(0, "x"))
+        h.carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
+        h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
+
+        assertEquals(
+            listOf(0xAE01),
+            h.carSends(
+                0xAE00,
+                Iap2Csm.param(3, ByteArray(0)) +
+                    Iap2Csm.param(4, ByteArray(0)) +
+                    Iap2Csm.param(5, ByteArray(0)),
+            ),
+        )
+
+        val raw = h.lastRawFrameOf(0xAE01)!!
+        val params = Iap2Csm.parseParams(raw.copyOfRange(6, raw.size))
+        assertEquals(listOf(3, 4, 5), params.map { it.id })
+        assertEquals("param 3 为 u16（iPhone 对照组实测）", 2, params.first { it.id == 3 }.value.size)
+        assertEquals(100, params.first { it.id == 4 }.value[0].toInt() and 0xFF)
         assertTrue(params.first { it.id == 5 }.value[0].toInt() in 0..1)
     }
 }

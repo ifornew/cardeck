@@ -85,6 +85,7 @@ object BtProfiles {
             }
         val before = connectedNames(context, address)
         if (before.isEmpty()) return emptyList()
+        val bondBefore = runCatching { device.bondState }.getOrDefault(-1)
         for (id in profiles) {
             if (profileName(id) !in before) continue
             proxy(context, id)?.let { disconnectProfile(it, device) }
@@ -94,6 +95,12 @@ object BtProfiles {
             // BLUETOOTH_CONNECT）。车载/耳机当前连接的设备可能被一并断开，属预期。
             runCatching { BluetoothDevice::class.java.getMethod("disconnect").invoke(device) }
             awaitDisconnected(context, address, 500L)
+        }
+        // 配对关系绝不能被这条路径破坏（车机侧配对丢失 = 每轮弹配对 + 判「不支持 CarPlay」）。
+        // 反射 disconnect 在个别 ROM 上语义可能越界，这里留痕以便日志定案。
+        val bondAfter = runCatching { device.bondState }.getOrDefault(-1)
+        if (bondBefore != bondAfter) {
+            Log.w(TAG, "⚠ 断开配置文件后配对状态变化：$bondBefore → $bondAfter（${device.address}）")
         }
         return before
     }

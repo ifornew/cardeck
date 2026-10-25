@@ -17,8 +17,10 @@ import io.github.shaonialife.cardeck.capture.HiddenDisplaySource
 import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
 import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
 import io.github.shaonialife.cardeck.input.ConsumerKeys
+import io.github.shaonialife.cardeck.input.KnobKeys
 import io.github.shaonialife.cardeck.input.TouchReports
 import io.github.shaonialife.cardeck.input.TouchRouter
+import io.github.shaonialife.cardeck.launcher.VirtualLauncher
 import io.github.shaonialife.cardeck.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
 import io.github.shaonialife.cardeck.net.AirPlayFeatures
@@ -28,6 +30,7 @@ import io.github.shaonialife.cardeck.net.EndpointHosts
 import io.github.shaonialife.cardeck.net.WifiCarPlayConnector
 import io.github.shaonialife.cardeck.net.WifiSavedNetworks
 import io.github.shaonialife.cardeck.service.CarPlayService
+import io.github.shaonialife.cardeck.shizuku.CarInputClient
 import io.github.shaonialife.cardeck.shizuku.Shell
 import io.github.shaonialife.cardeck.shizuku.ShizukuGate
 import io.github.shaonialife.cardeck.ui.ScreenDimmer
@@ -441,10 +444,11 @@ object SessionController {
         ctrlAdvertiser?.resetInviteCount()
         // 后台发布：start() 首次要向 Shizuku 解析真实蓝牙 MAC（shell），不能在主线程做
         Bg.run("ctrl-publish") { ctrlAdvertiser?.start() }
-        // 真车路径：手机主动连车机（SDP …caff 配件服务）
-        // 测试台路径：监听手机侧 iPhone UUID，等 DiPlay/xcertplay 回连
-        bluetoothClient?.start()
+        // 主路径（真车）：监听手机侧 iPhone UUID，等车机回连 …cafe（BMW 82772 实测形态）
+        // 兜底路径：主动连车机（SDP …caff 配件服务，奥迪 MIB3 实测）——宽限超时才启用，
+        // 故必须先开监听，保证车机回连时服务端已在等待。
         bluetoothServer?.start()
+        bluetoothClient?.start()
         // 诊断（奥迪实测：手机与车机「蓝牙已连接」时车机不开放 CarPlay）：
         // 连之前把目标设备的蓝牙配置文件状态打出来，失败时一眼看出是不是这个原因。
         Bg.run("bt-profile-diag") {
@@ -1800,29 +1804,40 @@ object SessionController {
                                         val report = command["hidReport"] as? ByteArray
                                         // 车机媒体键（Consumer Control）走 hidSendReport 通路，
                                         // 判定**以设备描述符为准**（不按 uuid、不按车机型号写死）：
-                                        // 描述符声明了 Consumer 页(0x0C)的设备才当媒体键，报告字节是
-                                        // Usage 数组下标（HID Array 语义）。触摸/旋钮/电话设备的描述符
-                                        // 分别是 Digitizer/GenericDesktop/Telephony 页，一律不走这里——
-                                        // DiPlay 的 knob(4B) 与 telephony(1B) 报告长度与媒体键重叠，
-                                        // 只靠长度会误判（如 telephony usage 0xB3 会误发「快进」）。
+                                        // 描述符声明了 Consumer 页(0x0C)的设备才当媒体键。
+                                        // 报告语义两种（ConsumerKeys.usagesFor 统一处理）：
+                                        //  - Array(81 00)：字节是 Usage 数组下标（奥迪）；
+                                        //  - Variable/位图(81 02)：每 usage 占 1bit（本田、BMW——
+                                        //    2026-10-23 实测 BMW ButtonInput 报 0x01/0x02/0x04 =
+                                        //    bit0/1/2 → usages[0..2]=0xB5 下一曲/0xB6 上一曲/0xB0 播放；
+                                        //    此前错用 Array 语义把位图当下标，全部「无对应键」丢弃）。
                                         val descriptor = uuid?.let { setup.hidDescriptors[it] }
+                                        // 旋钮设备（含 Wheel）的描述符里也嵌了 Consumer 页（AC Back），
+                                        // 必须先判旋钮：否则旋钮的滚轮报告（byte0=0）会被
+                                        // 「Consumer 释放」分支吞掉，永远到不了旋钮处理。
+                                        val knobMap =
+                                            descriptor?.let(KnobKeys::parseDescriptor)
                                         val keyMap =
-                                            descriptor?.let(ConsumerKeys::parseDescriptor)
-                                        val rawValue =
-                                            report
-                                                ?.takeIf { it.isNotEmpty() }
-                                                ?.let { it[0].toInt() and 0xFF }
-                                        val consumerUsage =
+                                            if (knobMap == null) {
+                                                descriptor?.let(ConsumerKeys::parseDescriptor)
+                                            } else {
+                                                null
+                                            }
+                                        val pressedUsages =
                                             when {
-                                                // 有描述符：只有 Consumer 设备才解析（非 Consumer → null）
-                                                descriptor != null -> keyMap?.let { rawValue?.let(it::usageFor) }
+                                                // 有描述符：只有 Consumer 设备才解析（非 Consumer → 空）
+                                                keyMap != null && report != null ->
+                                                    keyMap.usagesFor(report)
                                                 // 描述符缺失（未知车机）：保守回退——仅 1 字节报告，
                                                 // 值当 Usage ID 直读
-                                                report != null && report.size == 1 -> rawValue?.takeIf { it != 0 }
-                                                else -> null
+                                                descriptor == null && report != null && report.size == 1 ->
+                                                    listOfNotNull(
+                                                        (report[0].toInt() and 0xFF).takeIf { it != 0 },
+                                                    )
+                                                else -> emptyList()
                                             }
                                         val contacts =
-                                            if (consumerUsage == null && report != null) {
+                                            if (pressedUsages.isEmpty() && knobMap == null && report != null) {
                                                 // 触摸格式按设备描述符判定（Digitizer 页 + 单指/多槽），
                                                 // 描述符不可用时按报文长度回退——不依赖车机型号或 uuid
                                                 val touchFormat =
@@ -1831,26 +1846,68 @@ object SessionController {
                                             } else {
                                                 null
                                             }
-                                        if (consumerUsage != null) {
-                                            val keyCode = ConsumerKeys.keyCodeFor(consumerUsage)
-                                            if (keyCode != 0) {
-                                                dispatchMediaKey(keyCode)
-                                                appendLog(
-                                                    "EVENT: 车机媒体键 ${ConsumerKeys.nameOf(consumerUsage)}" +
-                                                        "（uuid=$uuid usage=0x%02x → keyCode=$keyCode）"
-                                                            .format(consumerUsage),
-                                                )
-                                            } else {
-                                                appendLog(
-                                                    "EVENT: 车机媒体键 ${ConsumerKeys.nameOf(consumerUsage)}" +
-                                                        "（uuid=$uuid usage=0x%02x）无对应 Android 键，忽略"
-                                                            .format(consumerUsage),
-                                                )
+                                        if (pressedUsages.isNotEmpty()) {
+                                            pressedUsages.forEach { consumerUsage ->
+                                                val keyCode = ConsumerKeys.keyCodeFor(consumerUsage)
+                                                if (keyCode != 0) {
+                                                    dispatchMediaKey(keyCode)
+                                                    appendLog(
+                                                        "EVENT: 车机媒体键 ${ConsumerKeys.nameOf(consumerUsage)}" +
+                                                            "（uuid=$uuid usage=0x%02x → keyCode=$keyCode）"
+                                                                .format(consumerUsage),
+                                                    )
+                                                } else {
+                                                    appendLog(
+                                                        "EVENT: 车机媒体键 ${ConsumerKeys.nameOf(consumerUsage)}" +
+                                                            "（uuid=$uuid usage=0x%02x）无对应 Android 键，忽略"
+                                                                .format(consumerUsage),
+                                                    )
+                                                }
                                             }
                                         } else if (keyMap != null && report != null) {
                                             // Consumer 设备的「无按键」/释放报文（值为 0 或下标越界）：
                                             // 静默计数，避免释放事件刷屏
                                             consumerReleaseCount++
+                                        } else if (knobMap != null && report != null) {
+                                            // 旋钮（iDrive knob / 方控滚轮）：按钮位是状态位——
+                                            // 边沿检测后发键；滚轮是相对增量，非零即发滚动。
+                                            val event = knobMap.parse(report)
+                                            val prevBits = knobButtonStates[uuid] ?: 0
+                                            val nowBits =
+                                                (if (event.confirm) 1 else 0) or (if (event.back) 2 else 0)
+                                            knobButtonStates[uuid] = nowBits
+                                            val knobDisplay = VirtualLauncher.appDisplayId
+                                            if (event.confirm && prevBits and 1 == 0) {
+                                                val ok =
+                                                    knobDisplay >= 0 &&
+                                                        CarInputClient.service?.key(knobDisplay, KeyEvent.KEYCODE_DPAD_CENTER) == true
+                                                appendLog("EVENT: 方控确认键 → DPAD_CENTER " + if (ok) "已注入" else "注入失败")
+                                            }
+                                            if (event.back && prevBits and 2 == 0) {
+                                                val ok =
+                                                    knobDisplay >= 0 &&
+                                                        CarInputClient.service?.key(knobDisplay, KeyEvent.KEYCODE_BACK) == true
+                                                appendLog("EVENT: 方控返回键 → BACK " + if (ok) "已注入" else "注入失败")
+                                            }
+                                            if (event.wheelDelta != 0) {
+                                                // 方向约定（待实车校准）：BMW 报告正增量暂定映射为
+                                                // AXIS_VSCROLL 正（向下滚）；反了改这里的符号。
+                                                val ok =
+                                                    knobDisplay >= 0 &&
+                                                        CarInputClient.service?.scroll(
+                                                            knobDisplay,
+                                                            VirtualLauncher.appAreaWidth / 2,
+                                                            VirtualLauncher.appHeightPx / 2,
+                                                            event.wheelDelta.toFloat(),
+                                                        ) == true
+                                                if (knobScrollLogCount < 20) {
+                                                    knobScrollLogCount++
+                                                    appendLog(
+                                                        "EVENT: 方控滚轮 delta=${event.wheelDelta} → 滚动 " +
+                                                            if (ok) "已注入" else "注入失败",
+                                                    )
+                                                }
+                                            }
                                         } else if (contacts != null) {
                                             if (touchLogCount <= 30 || touchLogCount % 50 == 0) {
                                                 appendLog(
@@ -1903,6 +1960,21 @@ object SessionController {
                                         // 回 modesChanged 声明手机持有主屏/主音频
                                         appendLog("EVENT: 车机请求 changeModes → 回 modesChanged 接管资源")
                                         client.assertModes()
+                                    }
+
+                                    "requestSiri" -> {
+                                        // 方控语音键（2026-10-23 BMW 实测：siriAction=1 按下、3 抬起）。
+                                        // 按下即触发本机语音助手。语音助手是系统 UI，注到主屏(display 0)。
+                                        val siriAction =
+                                            (command["params"] as? Map<*, *>)
+                                                ?.get("siriAction")?.toString()?.toIntOrNull()
+                                        if (siriAction == 1) {
+                                            val ok =
+                                                CarInputClient.service?.key(0, KeyEvent.KEYCODE_VOICE_ASSIST) == true
+                                            appendLog("EVENT: 方控语音键 → VOICE_ASSIST " + if (ok) "已注入" else "注入失败")
+                                        } else {
+                                            appendLog("EVENT: requestSiri siriAction=$siriAction（抬起/其他，忽略）")
+                                        }
                                     }
 
                                     else ->
@@ -2223,6 +2295,13 @@ object SessionController {
     /** 车机媒体键「释放」报文计数（值为 0 的 1 字节报告，静默丢弃，仅计数备查）。 */
     @Volatile
     private var consumerReleaseCount = 0
+
+    /** 旋钮按钮位状态（uuid → bit0 确认/bit1 返回）：状态位报告的边沿检测用。 */
+    private val knobButtonStates = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /** 旋钮滚动日志节流（前 20 条全打，之后静默——滚动报告频率高）。 */
+    @Volatile
+    private var knobScrollLogCount = 0
 
     @Volatile
     private var iapEventMessageCount = 0

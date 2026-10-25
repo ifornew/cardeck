@@ -16,15 +16,14 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 手机侧（iPhone 角色）**主动连接车机**的无线 iAP2 RFCOMM 客户端 —— 真车阶段新增。
+ * 手机侧（iPhone 角色）**主动连接车机**的无线 iAP2 RFCOMM 客户端 —— 兜底通道。
  *
- * 真无线 CarPlay 建链方向（对照 carplay-wifi-extractor client 模式，已在真车验证）：
- * 手机与车机完成系统级蓝牙配对后，由**手机主动连入**车机 SDP 广播的配件端服务
- * （UUID 00000000-deca-fade-deca-deafdecacaff，奥迪 MIB3 SDP 实测存在）；
- * 车机从不主动回连手机（测试台 DiPlay 会回连，那是接收端的测试行为）。
- *
- * 连上后复用与测试台完全相同的发送端 bring-up（[Iap2SenderSession]），
- * 成功时回调 [onEndpoint] 交出热点凭据与 AirPlay 端点。
+ * 两条真实建链方向并存（均已在真车验证）：
+ *  - **车机回连手机**（BMW 82772，2026-10-24 iPhone 抓包定谳）：HFP 完成 SLC 后，
+ *    车机 SDP 查询手机并回连 `…cafe`（由 [Iap2BluetoothServer] 监听并应答）。
+ *    这是真 iPhone 的形态，也是主路径。
+ *  - **手机主动连入车机**（奥迪 MIB3）：连车机 SDP 广播的配件端服务
+ *    `…caff`。仅作兜底：主路径等待宽限期结束后仍未收到回连才启用。
  */
 class Iap2BluetoothClient(
     private val context: Context,
@@ -50,6 +49,13 @@ class Iap2BluetoothClient(
 
         /** 「蓝牙已连接→已断开」日志节流（车机可能反复自动重连，避免刷屏）。 */
         private const val PROFILE_LOG_THROTTLE_MILLIS = 15_000L
+
+        /**
+         * 保持 HFP/A2DP 在线、等待车机回连 …cafe 的宽限期。
+         * iPhone 真机抓包：车机在 HFP SLC 完成后 1–2 秒即回连；20s 足够覆盖
+         * 车机 CarPlay 栈较慢的固件，超时才退回主动连入兜底。
+         */
+        private const val PROFILE_GRACE_MILLIS = 20_000L
 
         /** SDP 服务探测等待窗（fetchUuidsWithSdp → ACTION_UUID 广播）。 */
         private const val SDP_PROBE_TIMEOUT_MILLIS = 2_500L
@@ -194,6 +200,13 @@ class Iap2BluetoothClient(
                 null
             } ?: return
         var lastFailureLogAt = 0L
+        // 宽限起点取**本轮启动时刻**，而不是「首次观察到配置文件在线」：后者存在竞态——
+        // 预检 connectedNames 返回空、紧随其后的 disconnect() 内部再查已在线，于是
+        // 车机刚连上 HFP 就被断开（2026-10-24 19:11:24 日志实测：HFP 上线 1.6s 即被断）。
+        var graceStartedAt = android.os.SystemClock.uptimeMillis()
+        /** 配置文件「本轮在线」的起点；每次上线都会重置宽限基准（见下方说明）。 */
+        var profilesOnlineSince: Long? = null
+        var graceOpenedLogged = false
         while (running && generation.get() == myGeneration) {
             // 静默降噪（2026-10-10 用户实测后启用）——会话期间完全静默，不产生任何连接尝试/日志：
             //  - inboundActive：接收端正在连我们（两条 RFCOMM 会互相踩；Audi 实测双会话混乱）
@@ -230,10 +243,42 @@ class Iap2BluetoothClient(
                     }
                     continue
                 }
-                // 「只配对、不连接」：奥迪 MIB3 实测手机与车机处于蓝牙已连接状态
-                // （HFP/A2DP 在线）时，车机不开放无线 CarPlay 的 iAP2 服务窗口——
-                // 表现为每 3s 连接失败。iAP2 是独立的 SDP 直连服务，与这些配置文件
-                // 无关，断开后不影响 CarPlay 本身（声音走 WiFi 的 AirPlay）。
+                // 真车时序（2026-10-24 iPhone 抓包定谳）：车机在 **HFP 完成 SLC 之后**
+                // 才 SDP 查询并回连手机 …cafe。HFP 刚连上就把它断开，等于把触发条件
+                // 掐掉——车机永不回连，旧策略（立即断开 + 主动拨 …caff）必然吃 DM。
+                // 规则：**每一次**配置文件上线都给满宽限（保持 HFP/A2DP，等服务端收
+                // 回连）；宽限过后才断开并走主动连入兜底。车机随后自动重连又会获得
+                // 新的宽限窗口——避免「宽限一过就秒断、把后续每次 SLC 都掐掉」的循环
+                // （2026-10-24 20:34/20:39 日志实测）。
+                val online = BtProfiles.connectedNames(context, device.address)
+                val now = android.os.SystemClock.uptimeMillis()
+                if (online.isEmpty()) {
+                    profilesOnlineSince = null
+                } else if (profilesOnlineSince == null) {
+                    profilesOnlineSince = now
+                    graceStartedAt = now
+                    log(
+                        "BT-C: $name 蓝牙在线（${online.joinToString("/")}）——保持连接，" +
+                            "等待车机回连 iAP2（…cafe，宽限 ${PROFILE_GRACE_MILLIS / 1000}s）",
+                    )
+                }
+                if (now - graceStartedAt < PROFILE_GRACE_MILLIS) {
+                    if (!graceOpenedLogged) {
+                        graceOpenedLogged = true
+                        log(
+                            "BT-C: 先保持蓝牙配置文件在线 ${PROFILE_GRACE_MILLIS / 1000}s，" +
+                                "期间不主动拨 …caff（车机需先完成 HFP SLC 才会回连）",
+                        )
+                    }
+                    continue
+                }
+                if (online.isNotEmpty()) {
+                    log(
+                        "BT-C: 宽限 ${PROFILE_GRACE_MILLIS / 1000}s 内未收到车机回连——" +
+                            "断开 ${online.joinToString("/")}，改走主动连入（…caff）兜底",
+                    )
+                }
+                // 兜底路径：断开配置文件后主动连入车机（奥迪 MIB3 实测需要「只配对、不连接」）。
                 run {
                     val dropped = BtProfiles.disconnect(context, device)
                     if (dropped.isNotEmpty()) {
@@ -258,7 +303,31 @@ class Iap2BluetoothClient(
                     val now = android.os.SystemClock.uptimeMillis()
                     if (now - lastFailureLogAt > FAILURE_LOG_THROTTLE_MILLIS) {
                         lastFailureLogAt = now
-                        log("BT-C: 连接 $name 失败（车机未就绪或不在无线配对窗口），3 秒后重试…")
+                        // 带上真实失败原因与配对状态：车机删了配对而手机仍留旧密钥时，
+                        // 症状就是每轮「弹配对→验证密钥→不支持 CarPlay」，但错误行只写
+                        // 「未就绪」会掩盖这条线索（2026-10-23 实车）。
+                        val bond =
+                            when (runCatching { device.bondState }.getOrDefault(-1)) {
+                                BluetoothDevice.BOND_BONDED -> "已配对"
+                                BluetoothDevice.BOND_NONE -> "未配对"
+                                BluetoothDevice.BOND_BONDING -> "配对中"
+                                else -> "未知"
+                            }
+                        // 顺带把对端的 SDP 服务清单一并打出来：车机若根本不广播
+                        // …caff，connect 必然被拒（"read failed … read ret: -1"），
+                        // 与「设备不支持 CarPlay」是同一件事的两面（2026-10-24 实车）。
+                        runCatching { device.fetchUuidsWithSdp() }
+                        val uuids = runCatching { device.uuids }.getOrNull()
+                        val sdp =
+                            when {
+                                uuids == null -> "SDP 缓存为空"
+                                uuids.any { it.uuid == ACCESSORY_IAP2_UUID } ->
+                                    "SDP 含 iAP2 服务（共 ${uuids.size} 条）"
+                                else -> "SDP 不含 iAP2 服务（共 ${uuids.size} 条）"
+                            }
+                        log(
+                            "BT-C: 连接 $name 失败（$bond；$sdp${lastConnectFailure?.let { "；$it" } ?: ""}），3 秒后重试…",
+                        )
                     }
                 }
             }
@@ -314,12 +383,17 @@ class Iap2BluetoothClient(
         return if (withService.isNotEmpty()) withService else bonded
     }
 
+    /** 最近一次 RFCOMM 失败原因（供节流后的失败日志带上真实错误，而非笼统的「未就绪」）。 */
+    @Volatile
+    private var lastConnectFailure: String? = null
+
     @SuppressLint("MissingPermission")
     private fun tryConnect(device: BluetoothDevice): BluetoothSocket? {
         val socket =
             try {
                 device.createRfcommSocketToServiceRecord(ACCESSORY_IAP2_UUID)
             } catch (error: IOException) {
+                lastConnectFailure = "建 socket 失败：${error.message}"
                 return null
             }
         // 连接前就登记：connect() 是阻塞调用（SDP 查询 + 建链最长可达数十秒），
@@ -331,6 +405,7 @@ class Iap2BluetoothClient(
         } catch (error: IOException) {
             currentSocket.compareAndSet(socket, null)
             runCatching { socket.close() }
+            lastConnectFailure = "connect 失败：${error.message}"
             null
         }
     }

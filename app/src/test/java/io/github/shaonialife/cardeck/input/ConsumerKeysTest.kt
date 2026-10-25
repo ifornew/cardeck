@@ -73,6 +73,34 @@ class ConsumerKeysTest {
         assertNull(ConsumerKeys.parseDescriptor(telephonyDescriptor))
     }
 
+    /** BMW ID6 /info hidDevices ButtonInput 描述符原文（31B，2026-10-23 实车日志）。 */
+    private val bmwButtonDescriptor =
+        hex(
+            "05 0c 09 01 a1 01 05 0c 09 b5 09 b6 09 b0 15 00 25 01 75 01 95 03 81 02 75 05 95 01 81 01 c0",
+        )
+
+    @Test
+    fun bmwButtonInputIsBitmapNotArray() {
+        val map = ConsumerKeys.parseDescriptor(bmwButtonDescriptor)
+        assertNotNull("BMW ButtonInput 是 Consumer 设备", map)
+        assertEquals("81 02 = Variable/位图", false, map!!.isArray)
+        assertEquals(listOf(0xB5, 0xB6, 0xB0), map.usages)
+    }
+
+    @Test
+    fun bmwBitmapReportsExpandToPressedUsages() {
+        val map = ConsumerKeys.parseDescriptor(bmwButtonDescriptor)!!
+        // 2026-10-23 实车日志实测：0x01=下一曲、0x02=上一曲、0x04=播放、0x00=释放。
+        // 此前错用 Array 语义把位图值当下标 → 「未知(0x01) 无对应键」全部丢弃。
+        assertEquals(listOf(0xB5), map.usagesFor(hex("01")))
+        assertEquals(listOf(0xB6), map.usagesFor(hex("02")))
+        assertEquals(listOf(0xB0), map.usagesFor(hex("04")))
+        assertEquals(emptyList<Int>(), map.usagesFor(hex("00")))
+        assertEquals(KeyEvent.KEYCODE_MEDIA_NEXT, ConsumerKeys.keyCodeFor(0xB5))
+        assertEquals(KeyEvent.KEYCODE_MEDIA_PREVIOUS, ConsumerKeys.keyCodeFor(0xB6))
+        assertEquals(KeyEvent.KEYCODE_MEDIA_PLAY, ConsumerKeys.keyCodeFor(0xB0))
+    }
+
     @Test
     fun diplayMediaDescriptorUsesIndexSemantics() {
         // DiPlay（测试台）media 描述符：Usage 数组 6 项，报告值同为下标

@@ -1,11 +1,15 @@
 package io.github.shaonialife.cardeck.launcher.settings
 
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.RadioGroup
 import android.widget.SeekBar
 import android.widget.TextView
 import io.github.shaonialife.cardeck.R
@@ -507,6 +511,48 @@ class DockPanelFragment : SettingsPanelFragment() {
                 override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
             },
         )
+
+        // 导航快捷入口：家/单位地址（失焦或回车保存）+ 地图 App 选择（高德/百度）
+        val homeInput = view.findViewById<EditText>(R.id.navHomeInput)
+        val workInput = view.findViewById<EditText>(R.id.navWorkInput)
+        val appGroup = view.findViewById<RadioGroup>(R.id.navAppGroup)
+        homeInput.setText(DockPrefs.navHomeAddress(requireContext()))
+        workInput.setText(DockPrefs.navWorkAddress(requireContext()))
+        homeInput.addTextChangedListener(
+            object : TextWatcher {
+                override fun afterTextChanged(s: Editable?) {
+                    DockPrefs.setNavHomeAddress(requireContext(), s?.toString() ?: "")
+                }
+
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            },
+        )
+        workInput.addTextChangedListener(
+            object : TextWatcher {
+                override fun afterTextChanged(s: Editable?) {
+                    DockPrefs.setNavWorkAddress(requireContext(), s?.toString() ?: "")
+                }
+
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            },
+        )
+        appGroup.check(
+            if (DockPrefs.navMapApp(requireContext()) == DockPrefs.NAV_APP_BAIDU) {
+                R.id.navAppBaidu
+            } else {
+                R.id.navAppAmap
+            },
+        )
+        appGroup.setOnCheckedChangeListener { _, checkedId ->
+            DockPrefs.setNavMapApp(
+                requireContext(),
+                if (checkedId == R.id.navAppBaidu) DockPrefs.NAV_APP_BAIDU else DockPrefs.NAV_APP_AMAP,
+            )
+        }
     }
 }
 
@@ -601,6 +647,8 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         val scaleNote = view.findViewById<TextView>(R.id.displayScaleNote)
         val fps30 = view.findViewById<TextView>(R.id.btnFps30)
         val fps60 = view.findViewById<TextView>(R.id.btnFps60)
+        val fps90 = view.findViewById<TextView>(R.id.btnFps90)
+        val fps120 = view.findViewById<TextView>(R.id.btnFps120)
 
         // 滑条 progress（0..26）→ 百分比（30..160，步进 5）
         fun progressOf(percent: Int) = (percent - DisplayPrefs.SCALE_MIN) / DisplayPrefs.SCALE_STEP
@@ -647,28 +695,25 @@ class DisplayPanelFragment : SettingsPanelFragment() {
             },
         )
 
-        fun refreshFps(active30: Boolean) {
+        fun refreshFps(active: Int) {
             // 未选中片用暗色底（与容器同色）而非 null 背景，避免背景重置内边距
-            fps30.setBackgroundResource(
-                if (active30) R.drawable.bg_segment_sel else R.drawable.bg_segment,
-            )
-            fps30.setTextColor(
-                if (active30) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt(),
-            )
-            fps60.setBackgroundResource(
-                if (active30) R.drawable.bg_segment else R.drawable.bg_segment_sel,
-            )
-            fps60.setTextColor(
-                if (active30) 0xFF8E8E93.toInt() else 0xFFFFFFFF.toInt(),
-            )
+            listOf(fps30 to 30, fps60 to 60, fps90 to 90, fps120 to 120).forEach { (chip, value) ->
+                val selected = value == active
+                chip.setBackgroundResource(
+                    if (selected) R.drawable.bg_segment_sel else R.drawable.bg_segment,
+                )
+                chip.setTextColor(
+                    if (selected) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt(),
+                )
+            }
         }
 
         val savedFps = DisplayPrefs.fps(ctx)
-        refreshFps(savedFps < 60)
+        refreshFps(savedFps)
 
         fun applyFps(fps: Int) {
             DisplayPrefs.setFps(ctx, fps)
-            refreshFps(fps < 60)
+            refreshFps(fps)
             VirtualLauncher
                 .setStreamFps(fps)
             val live =
@@ -679,6 +724,8 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         }
         fps30.setOnClickListener { applyFps(30) }
         fps60.setOnClickListener { applyFps(60) }
+        fps90.setOnClickListener { applyFps(90) }
+        fps120.setOnClickListener { applyFps(120) }
 
         // 触摸注入节流（0=关闭，步进 8ms）：缓解「交互滞后但帧率正常」的事件堆积
         val throttleSeek = view.findViewById<SeekBar>(R.id.throttleSeek)

@@ -127,6 +127,14 @@ class VirtualIap2Link(
     /** 车机已订阅电源更新（收到 0xAE00 后置位；协议无 StopPowerUpdates，链路存活期内有效）。 */
     private var powerSubscribed = false
 
+    /**
+     * 车机 0xAE00 实际订阅的参数集合（订阅驱动应答，2026-10-23）。
+     * 真 iPhone 严格「订什么回什么」（WinPlay 对照组实测：订 3/4/5 回 3/4/5）；
+     * BMW 只订 6、xcertplay 订 4/5/6、WinPlay 订 3/4/5——不回订阅外的参数，
+     * 避免对端按未订阅参数丢弃整帧。解析不到时退化为 {4,5,6} 防御全集。
+     */
+    private var powerSubscribedParams: Set<Int> = DEFAULT_POWER_PARAMS
+
     /** 上一次 0xAE01 发送时刻（[nowMillis] 时钟）。 */
     private var powerLastSentAtMs = 0L
 
@@ -610,9 +618,17 @@ class VirtualIap2Link(
 
             Iap2MessageIds.START_POWER_UPDATES -> {
                 // 车机订阅电源状态 → 立即回一次，之后按周期续推（真 iPhone 的应答姿态）。
-                // xcertplay 发 0xAE00 时订阅 void(4)/void(5)/void(6)；
-                // BMW 车机只订阅 void(6)。旧布局 param 0/1 不在订阅清单内 → 不显示电量。
+                // 订阅驱动：记住 0xAE00 的参数清单，应答只带订阅内的参数。
+                // xcertplay 订 4/5/6；BMW 只订 6；WinPlay 订 3/4/5（订什么回什么）。
+                val subscribed =
+                    Iap2Csm
+                        .parseParams(frame.body)
+                        .map { it.id }
+                        .toSet()
+                powerSubscribedParams =
+                    subscribed.ifEmpty { DEFAULT_POWER_PARAMS }
                 powerSubscribed = true
+                log("IAPLINK: 车机 0xae00 电源订阅 参数=${powerSubscribedParams.sorted()}")
                 sendPowerUpdateLocked("订阅应答")
             }
 
@@ -711,16 +727,27 @@ class VirtualIap2Link(
      */
     private fun sendPowerUpdateLocked(reason: String) {
         val battery = readBattery()
-        sendCsmLocked(
-            Iap2MessageIds.POWER_UPDATE,
-            Iap2Csm.param(0x0004, byteArrayOf(battery.first.toByte())) +
-                Iap2Csm.param(0x0005, byteArrayOf(if (battery.second) 1 else 0)) +
-                Iap2Csm.param(0x0006, byteArrayOf(battery.first.toByte())),
-        )
+        // 按车机订阅集合组帧（订什么回什么）。取值参照真 iPhone 对照组实测：
+        // param3=u16(0)、param4/5=u8 小值（布尔/枚举语义，非电量）；param6=电量百分比。
+        // 4/5 语义未经车机侧确认，沿用既有猜测（4=电量、5=充电态），BMW 不订 4/5 无影响。
+        val body =
+            powerSubscribedParams
+                .sorted()
+                .mapNotNull { id ->
+                    when (id) {
+                        0x0003 -> Iap2Csm.param(0x0003, byteArrayOf(0, 0))
+                        0x0004 -> Iap2Csm.param(0x0004, byteArrayOf(battery.first.toByte()))
+                        0x0005 -> Iap2Csm.param(0x0005, byteArrayOf(if (battery.second) 1 else 0))
+                        0x0006 -> Iap2Csm.param(0x0006, byteArrayOf(battery.first.toByte()))
+                        else -> null // 订阅了未知参数：跳过（没有可信取值可给）
+                    }
+                }.fold(ByteArray(0)) { acc, bytes -> acc + bytes }
+        sendCsmLocked(Iap2MessageIds.POWER_UPDATE, body)
         powerLastSentAtMs = nowMillis()
         log(
             "IAPLINK: 0xae01 电源更新[$reason]" +
-                "（电量 ${battery.first}%，${if (battery.second) "充电中" else "未充电"}）",
+                "（电量 ${battery.first}%，${if (battery.second) "充电中" else "未充电"}，" +
+                "参数=${powerSubscribedParams.sorted()}）",
         )
     }
 
@@ -907,6 +934,9 @@ class VirtualIap2Link(
 
         /** 0xAE01 电源更新的周期推送间隔（车机状态栏刷新粒度，低频即可）。 */
         const val POWER_UPDATE_INTERVAL_MILLIS = 30_000L
+
+        /** 0xAE00 解析不到订阅参数时的防御全集（维持 xcertplay/BMW 既有兼容面）。 */
+        private val DEFAULT_POWER_PARAMS = setOf(0x0004, 0x0005, 0x0006)
 
         /**
          * 0x6802 的参数表 → HID 报文。

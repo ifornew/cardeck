@@ -137,7 +137,9 @@ class Iap2BluetoothServer(
             StreamDuplexStream(socket.inputStream, socket.outputStream) {
                 runCatching { socket.close() }
             }
-        val channel = Iap2LinkChannel(stream, name = "iap2-bt") { line -> log(line) }
+        // 车机连入后由**车机**发起 SYN（iPhone 真机抓包：车机 marker → 手机 marker →
+        // 车机 SYN → 手机 SYN|ACK）——用应答者模式，不能抢先发 SYN 与车机抢协商。
+        val channel = Iap2LinkChannel(stream, name = "iap2-bt", responder = true) { line -> log(line) }
         activeChannel = channel
         BtSessionGate.inboundActive = true
         try {

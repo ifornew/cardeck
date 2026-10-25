@@ -1230,6 +1230,68 @@ object VirtualLauncher {
         return ok
     }
 
+    /**
+     * 导航 URI 启动（高德 amapuri:// / 百度 baidumap://）到地图屏全屏。
+     *
+     * 为什么不能隐式 `am start -a VIEW -d uri --display N`（2026-10-23 实车踩坑）：
+     * 高德手机版的 scheme 由跳板组件 SchemeHandleActivity 处理，跳板内部二次
+     * startActivity 不带 display；若手机侧已有该包任务（地图主 Activity 多为
+     * singleTask，--display 被直接无视），路线最终落在手机上。
+     *
+     * 对策：① 用 PackageManager 把 URI 解析成实际组件（优先 preferPackages 顺序）；
+     * ② 清掉该包在其它屏（尤其手机屏 0）的既有任务（am stack remove 不杀进程）；
+     * ③ 显式 -n 组件 + -a VIEW -d uri 启动到地图屏；跳板内部的 NEW_TASK 跳转
+     * 在无异屏既有任务时会继承跳板所在（车机）屏。
+     */
+    fun launchNavUri(
+        uri: String,
+        preferPackages: List<String>,
+    ): Boolean {
+        val ctx = appContextRef ?: return false
+        val targetDisplay = if (mapDisplayId >= 0) mapDisplayId else appDisplayId
+        if (targetDisplay < 0) return false
+        val viewIntent =
+            android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(uri))
+        val candidates = ctx.packageManager.queryIntentActivities(viewIntent, 0)
+        val chosen =
+            preferPackages.firstNotNullOfOrNull { pkg ->
+                candidates.firstOrNull { it.activityInfo.packageName == pkg }
+            } ?: candidates.firstOrNull()
+        if (chosen == null) {
+            logSink?.invoke("NAV: 无应用可处理 $uri（地图 App 未安装？）")
+            return false
+        }
+        val component = ComponentName(chosen.activityInfo.packageName, chosen.activityInfo.name)
+        // 清其它屏该包任务（singleTask 会劫持 --display；同屏任务保留复用）
+        taskIdsByDisplayPkg().forEach { (displayId, byPkg) ->
+            if (displayId == targetDisplay) return@forEach
+            byPkg[component.packageName]?.forEach { taskId ->
+                Shell.exec("am stack remove $taskId", timeoutMs = 4000)
+                Log.i(TAG, "NAV: 清理它屏任务 pkg=${component.packageName} task=$taskId display=$displayId")
+            }
+        }
+        dashboardMode = false
+        notifyDashboard()
+        if (targetDisplay == mapDisplayId) setMapFullscreen(true)
+        val result =
+            Shell.exec(
+                "am start -n ${component.flattenToShortString()} -a android.intent.action.VIEW -d \"$uri\" " +
+                    "--display $targetDisplay -f 0x10000000",
+                timeoutMs = 8000,
+            )
+        val ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
+        logSink?.invoke(
+            "NAV: ${component.flattenToShortString()} disp=$targetDisplay ok=$ok uri=$uri out=${result.output.take(80)}",
+        )
+        if (ok) {
+            synchronized(runningApps) { runningApps.add(component) }
+            notifyRunningAppsChanged()
+        } else {
+            Log.w(TAG, "导航启动失败：${result.output.take(120)}")
+        }
+        return ok
+    }
+
     // ICU 汉字→拼音转写（Android 内置，无需第三方拼音库）。
     // "Han-Latin" 输出带声调，追加 Latin-ASCII 去音调（gāo → gao）。
     // Transliterator 非线程安全，统一加锁访问。

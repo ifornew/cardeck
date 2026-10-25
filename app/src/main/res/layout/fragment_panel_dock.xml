@@ -127,4 +127,92 @@
             android:textColor="#FF8E8E93"
             android:textSize="12sp" />
     </LinearLayout>
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="22dp"
+        android:text="导航快捷入口"
+        android:textColor="#FFF5F5F7"
+        android:textSize="14sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="仪表盘音乐卡上方的「回家 / 回单位」入口，点击即在所选地图 App 中规划路线。"
+        android:textColor="#FF8E8E93"
+        android:textSize="12sp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="家地址"
+        android:textColor="#FFF5F5F7"
+        android:textSize="14sp" />
+
+    <EditText
+        android:id="@+id/navHomeInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:hint="例：XX 小区 X 号楼"
+        android:singleLine="true"
+        android:textColor="#FFF5F5F7"
+        android:textColorHint="#FF8E8E93"
+        android:textSize="14sp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="单位地址"
+        android:textColor="#FFF5F5F7"
+        android:textSize="14sp" />
+
+    <EditText
+        android:id="@+id/navWorkInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:hint="例：XX 科技园 X 座"
+        android:singleLine="true"
+        android:textColor="#FFF5F5F7"
+        android:textColorHint="#FF8E8E93"
+        android:textSize="14sp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="地图应用"
+        android:textColor="#FFF5F5F7"
+        android:textSize="14sp" />
+
+    <RadioGroup
+        android:id="@+id/navAppGroup"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:orientation="horizontal">
+
+        <RadioButton
+            android:id="@+id/navAppAmap"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="高德地图"
+            android:textColor="#FFF5F5F7"
+            android:textSize="14sp" />
+
+        <RadioButton
+            android:id="@+id/navAppBaidu"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="20dp"
+            android:text="百度地图"
+            android:textColor="#FFF5F5F7"
+            android:textSize="14sp" />
+    </RadioGroup>
 </LinearLayout>

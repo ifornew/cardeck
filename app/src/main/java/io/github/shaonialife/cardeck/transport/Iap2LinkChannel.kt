@@ -14,6 +14,12 @@ import java.util.concurrent.TimeUnit
 class Iap2LinkChannel(
     private val stream: DuplexStream,
     name: String = "iap2-link",
+    /**
+     * 应答者模式：对端（车机）连入时由**对端**发起 SYN，本方只回 marker + SYN|ACK。
+     * 真实无线 CarPlay 的蓝牙链路由车机主动发起（iPhone 抓包：车机发 marker → 手机
+     * 回 marker → 车机 SYN → 手机 SYN|ACK）；若本方抢先发 SYN，就会与车机抢协商。
+     */
+    private val responder: Boolean = false,
     private val log: (String) -> Unit = {},
 ) : Closeable {
     private val engine = Iap2LinkEngine()
@@ -24,6 +30,9 @@ class Iap2LinkChannel(
     @Volatile
     private var terminated = false
     private var readySignalled = false
+
+    /** 应答者模式下「等不到对端 SYN 就改当发起方」的截止时刻（持 [lock] 访问）。 */
+    private var responderFallbackAt: Long? = null
 
     /** 原始字节转储预算（每方向每连接），真车字节级对照用。 */
     private var rxDumpBudget = RAW_DUMP_LIMIT
@@ -36,6 +45,7 @@ class Iap2LinkChannel(
     val isAlive: Boolean get() = !terminated
 
     init {
+        engine.echoMarker = responder
         engine.onPeerSynchronizationAdopted = { sync ->
             log(
                 "LINK: 采纳对端会话表 maxOutgoing=${sync.maxOutgoing} maxLen=${sync.maxLength} " +
@@ -118,7 +128,14 @@ class Iap2LinkChannel(
     private fun runReader() {
         try {
             synchronized(lock) {
-                engine.start(nowMillis())
+                val now = nowMillis()
+                if (responder) {
+                    engine.startResponder(now)
+                    responderFallbackAt = now + RESPONDER_FALLBACK_MILLIS
+                    log("LINK: 应答者模式——先回 marker，等车机发 SYN")
+                } else {
+                    engine.start(now)
+                }
                 drainOutputLocked()
             }
             val buffer = ByteArray(4096)
@@ -160,6 +177,7 @@ class Iap2LinkChannel(
             synchronized(lock) {
                 if (terminated) return
                 engine.advanceTime(nowMillis())
+                maybeInitiateFallbackLocked()
                 processEventsLocked()
                 drainOutputLocked()
                 signalReadyLocked()
@@ -181,6 +199,23 @@ class Iap2LinkChannel(
                 }
             }
         }
+    }
+
+    /**
+     * 持锁调用：应答者模式的兜底——[RESPONDER_FALLBACK_MILLIS] 内未收到车机的 SYN
+     * （例如测试台把手机当发起方），改为发起方补发 marker + SYN，避免链路空等。
+     */
+    private fun maybeInitiateFallbackLocked() {
+        val deadline = responderFallbackAt ?: return
+        val now = nowMillis()
+        if (engine.state != Iap2LinkEngine.State.NEGOTIATING) {
+            responderFallbackAt = null
+            return
+        }
+        if (now < deadline) return
+        responderFallbackAt = null
+        log("LINK: 对端未主动发起（${RESPONDER_FALLBACK_MILLIS}ms），改为发起方补发 marker+SYN")
+        engine.initiate(now)
     }
 
     /** 持锁调用：抽取引擎事件并搬运输出。 */
@@ -258,6 +293,9 @@ class Iap2LinkChannel(
 
         /** 逐帧摘要日志上限（每方向每连接）。 */
         const val FRAME_LOG_LIMIT = 40
+
+        /** 应答者模式等待车机 SYN 的时长；超时后改当发起方（兼容测试台时序）。 */
+        const val RESPONDER_FALLBACK_MILLIS = 1_500L
 
         /** 链路终结哨兵；真实控制载荷至少包含一段 CSM 帧，不会为空。 */
         val POISON = ByteArray(0)

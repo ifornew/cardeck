@@ -668,7 +668,10 @@ class DualDisplayComposer(
         // 否则编码器无输入、视频流停摆，接收端画面冻结（表现为"桌面卡死/不可交互"，
         // 2026-10-09 实测踩坑：触摸其实送到了，只是没有帧能反映出来）。
         try {
-            var lastComposeAt = System.currentTimeMillis()
+            // 帧节奏（2026-10-23 卡顿优化）：单调时钟 + deadline 等待取代 sleep(8) 粗轮询——
+            // 旧实现在 60fps 档（间隔 16.6ms）因 8ms 粒度产生 16~24ms 帧间隔抖动。
+            // 现在粗睡到 deadline 前 1ms、再短让出对齐，帧间隔抖动压到 <1ms。
+            var nextComposeAt = System.nanoTime()
             while (running.get()) {
                 // 快车道（60fps 节流）只由「会被画进输出画面」的输入驱动：
                 // dock + 当前活动应用屏（app/hi 二选一）+ tile 可见时的地图屏。
@@ -682,13 +685,22 @@ class DualDisplayComposer(
                         dock.hasNewFrame ||
                         (if (activeAppHi) appHi else app)?.hasNewFrame == true ||
                         (tileLayout != TileLayout.HIDDEN && mapInput?.hasNewFrame == true)
-                val now = System.currentTimeMillis()
-                val intervalMs = if (hasNew) 1000L / targetFps.coerceIn(1, 120) else 33L
-                if (now - lastComposeAt >= intervalMs) {
+                val intervalNs =
+                    (if (hasNew) 1000L / targetFps.coerceIn(1, 120) else 33L) * 1_000_000L
+                val now = System.nanoTime()
+                if (now >= nextComposeAt) {
                     composeFrame(fullRedraw = false)
-                    lastComposeAt = now
+                    // 落后超一个周期说明上一帧合成/编码已超标：重置基准，避免追帧连发加剧卡顿
+                    nextComposeAt =
+                        if (now - nextComposeAt > intervalNs) now + intervalNs else nextComposeAt + intervalNs
                 } else {
-                    Thread.sleep(8)
+                    val remainNs = nextComposeAt - now
+                    if (remainNs > 2_000_000L) {
+                        // park 唤醒有 ~百微秒级误差：提前 1ms 醒，余量交给下一轮短让出
+                        java.util.concurrent.locks.LockSupport.parkNanos(remainNs - 1_000_000L)
+                    } else {
+                        Thread.yield()
+                    }
                 }
             }
         } catch (_: InterruptedException) {

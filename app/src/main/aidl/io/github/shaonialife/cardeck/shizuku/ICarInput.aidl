@@ -14,6 +14,11 @@ interface ICarInput {
     boolean pointerMove(int displayId, int x, int y);
     boolean pointerUp(int displayId, int x, int y);
 
+    // 方控/旋钮原语（2026-10-23）：按键 down+up 与滚轮滚动（ACTION_SCROLL/AXIS_VSCROLL）。
+    // key 用于确认/返回/语音助手；scroll 的 vSteps 有符号，语义同 AXIS_VSCROLL（正=向下滚）。
+    boolean key(int displayId, int keyCode);
+    boolean scroll(int displayId, int x, int y, float vSteps);
+
     // 受信虚拟屏（shell 权限）：第三方应用的新任务可落在其上，
     // 解决「应用内跳转的任务被重定向到手机主屏」问题（AOSP 安全策略）。
     // trusted=false：不声明 FLAG_TRUSTED——第三方任务无法被系统安置到该屏

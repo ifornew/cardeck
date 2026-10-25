@@ -37,7 +37,7 @@ class VideoSender(
     /** H.264 4:2:0 要求偶数尺寸——奇数高度会让编码器在首帧输入时进错误态（125% 缩放实测踩坑）。 */
     width: Int,
     height: Int,
-    /** 目标帧率（30/60）：编码器元数据 + 60fps 提码率；实际节奏由合成器驱动。 */
+    /** 目标帧率（30/60/90/120）：编码器元数据 + 高帧率提码率；实际节奏由合成器驱动。 */
     private val targetFps: Int = 30,
     private val log: (String) -> Unit,
     /** 推流自然结束（对端断开等）时回调——CarPlay 会话真实结束的信号。 */
@@ -119,19 +119,58 @@ class VideoSender(
             val bitrate =
                 (
                     ((width * height * 6L).toInt()).coerceIn(2_000_000, 10_000_000) *
-                        if (targetFps >= 60) 1.5f else 1f
+                        // 高帧率档提码率保画质：60fps ×1.5，90fps ×2，120fps ×2.5（实验档）
+                        if (targetFps >= 120) 2.5f else if (targetFps >= 90) 2f else if (targetFps >= 60) 1.5f else 1f
                 ).toInt().coerceAtMost(15_000_000)
             log("VIDEO: 启动编码器 ${width}x$height@$targetFps ${bitrate / 1_000_000}Mbps（端口已连通）")
 
-            val format =
+            // 低延迟档（2026-10-23 卡顿优化）：
+            //  - BITRATE_MODE_CBR：车载 WiFi 上 VBR 码率峰值会顶爆瞬时带宽（实测每秒 I 帧
+            //    92~184KB，一颗就占 6Mbps 预算约 0.25s——周期性卡顿的嫌疑），CBR 可摊平；
+            //  - Baseline profile：去 B 帧（华为实测基础配置默认也输出 profile=66 Baseline，保险项）；
+            //  - KEY_PRIORITY=0：声明实时优先级。
+            // 2026-10-23 华为实测：能力探测声称 CBR/Baseline 都支持，但 configure 连
+            // 「CBR+Baseline」也整体报 Error 0x80001001（OMX_ErrorUndefined，厂商笼统错误）——
+            // 探测不可信，改为逐 key 隔离尝试，日志直接暴露是哪个 key 被实际拒绝。
+            data class Attempt(val name: String, val cbr: Boolean, val baseline: Boolean, val priority: Boolean)
+            val attempts =
+                listOf(
+                    Attempt("CBR+Baseline+实时优先级", cbr = true, baseline = true, priority = true),
+                    Attempt("仅 CBR", cbr = true, baseline = false, priority = false),
+                    Attempt("仅 Baseline", cbr = false, baseline = true, priority = false),
+                    Attempt("基础配置", cbr = false, baseline = false, priority = false),
+                )
+
+            fun avcFormat(a: Attempt): MediaFormat =
                 MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
                     setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                     setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
                     setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
                     setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                    if (a.cbr) {
+                        setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+                    }
+                    if (a.baseline) {
+                        setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+                    }
+                    if (a.priority) {
+                        setInteger(MediaFormat.KEY_PRIORITY, 0)
+                    }
                 }
             val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            var configured = false
+            for (attempt in attempts) {
+                if (configured) break
+                try {
+                    codec.configure(avcFormat(attempt), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                    configured = true
+                    log("VIDEO: 编码配置生效（${attempt.name}）")
+                } catch (error: Exception) {
+                    log("VIDEO: 配置「${attempt.name}」被拒（${error.message}）——降档重试")
+                    runCatching { codec.reset() }
+                }
+            }
+            if (!configured) throw IllegalStateException("编码器全部配置档位被拒")
             val surface = codec.createInputSurface()
             codec.start()
             encoder = codec

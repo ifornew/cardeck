@@ -90,6 +90,9 @@ class GridActivity : AppCompatActivity() {
         }
     }
 
+    /** 虚拟屏 VSYNC 保活（桌面不自动刷新的修复；真实屏自动跳过）。 */
+    private val vsyncKeepAlive = VsyncKeepAlive(this)
+
     /** 地图布局变化（全屏/分屏切换改变音乐卡壁纸切片区域）。
      *  具名字段（勿内联匿名 lambda）：onDestroy 才能对称移除，否则桌面重建累积泄漏。 */
     private val mapLayoutListener: (Boolean) -> Unit =
@@ -319,6 +322,7 @@ class GridActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         DockPrefs.syncRatio(this) // 冷启动时把持久化的 splitRatio 加载到全局变量（SPLIT_MAP_WIDTH_RATIO）
         setContentView(R.layout.activity_grid)
+        vsyncKeepAlive.install()
 
         // 格子尺寸/行数按屏幕动态计算（布局关系在 XML，尺寸测量在代码）
         computeCellMetrics()
@@ -582,6 +586,45 @@ class GridActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 导航快捷入口：按 DockPrefs 的家/单位地址拼地图 URI 并在应用屏拉起。
+     * 地址为空 → 提示去设置页配置；URI 方案：
+     *  高德 amapuri://route/plan/?dname=<编码地址>&dev=0&t=0
+     *  百度 baidumap://map/direction?destination=<编码地址>&mode=driving
+     */
+    private fun launchNavDestination(home: Boolean) {
+        val address =
+            if (home) {
+                DockPrefs.navHomeAddress(this)
+            } else {
+                DockPrefs.navWorkAddress(this)
+            }
+        val label = if (home) "家" else "单位"
+        if (address.isBlank()) {
+            android.widget.Toast
+                .makeText(this, "未设置${label}地址——请在车机设置「dock 栏」页配置", android.widget.Toast.LENGTH_LONG)
+                .show()
+            return
+        }
+        val encoded = java.net.URLEncoder.encode(address, "UTF-8")
+        val baidu = DockPrefs.navMapApp(this) == DockPrefs.NAV_APP_BAIDU
+        val uri =
+            if (baidu) {
+                "baidumap://map/direction?destination=$encoded&mode=driving"
+            } else {
+                "amapuri://route/plan/?dname=$encoded&dev=0&t=0"
+            }
+        // 处理该 scheme 的候选包按优先级给出（车机版优先于手机版）：
+        // 隐式启动会被跳板组件劫持回手机侧任务，launchNavUri 内部显式解析组件。
+        val preferPackages =
+            if (baidu) {
+                listOf("com.baidu.BaiduMap")
+            } else {
+                listOf("com.autonavi.amapauto", "com.autonavi.minimap")
+            }
+        Bg.run("launch-nav") { VirtualLauncher.launchNavUri(uri, preferPackages) }
+    }
+
     /** 仪表盘页 Holder：面板随页面创建（卡片边距/圆角/媒体控制/壁纸切片）。 */
     private inner class DashboardHolder(
         val panel: View,
@@ -617,16 +660,32 @@ class GridActivity : AppCompatActivity() {
                             bottomMargin = bottomInset
                         }
                     }
-            panel.outlineProvider =
+            // 根视图改为垂直 LinearLayout（导航卡+音乐卡）后，圆角裁剪要落在两张卡片
+            // 上而不是整个 panel（panel 本身透明，含两卡之间的间距带）。
+            val roundRadius = cardMargin * 1.4f
+            val roundOutline =
                 object : android.view.ViewOutlineProvider() {
                     override fun getOutline(
                         view: View,
                         outline: android.graphics.Outline,
                     ) {
-                        outline.setRoundRect(0, 0, view.width, view.height, cardMargin * 1.4f)
+                        outline.setRoundRect(0, 0, view.width, view.height, roundRadius)
                     }
                 }
-            panel.clipToOutline = true
+            panel.findViewById<View>(R.id.navCard).apply {
+                outlineProvider = roundOutline
+                clipToOutline = true
+            }
+            panel.findViewById<View>(R.id.musicCard).apply {
+                outlineProvider = roundOutline
+                clipToOutline = true
+            }
+            panel.findViewById<View>(R.id.navHome).setOnClickListener {
+                launchNavDestination(home = true)
+            }
+            panel.findViewById<View>(R.id.navWork).setOnClickListener {
+                launchNavDestination(home = false)
+            }
             panel.findViewById<ImageView>(R.id.dashPrev).setOnClickListener {
                 dispatchMediaKey(android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS)
             }
@@ -759,6 +818,7 @@ class GridActivity : AppCompatActivity() {
         DockPrefs.removeListener(dockPrefsListener)
         WallpaperStore
             .removeCanvasReadyListener(canvasReadyListener)
+        vsyncKeepAlive.release()
         super.onDestroy()
     }
 

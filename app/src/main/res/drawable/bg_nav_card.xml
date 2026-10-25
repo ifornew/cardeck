@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 仪表盘导航快捷入口卡片背景：深色半透明圆角（圆角与音乐卡 outline 裁剪一致，
+     代码里同半径 clipToOutline，此处的 corner 仅兜底）。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="12dp" />
+    <solid android:color="#B323282E" />
+</shape>

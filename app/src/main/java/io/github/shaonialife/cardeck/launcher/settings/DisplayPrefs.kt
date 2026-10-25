@@ -48,7 +48,7 @@ object DisplayPrefs {
             .apply()
     }
 
-    /** 目标帧率（30/60；驱动合成器出帧节奏，运行中切换实时生效）。 */
+    /** 目标帧率（30/60/90/120；驱动合成器出帧节奏，运行中切换实时生效）。 */
     fun fps(context: Context): Int =
         context
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -58,10 +58,18 @@ object DisplayPrefs {
         context: Context,
         fps: Int,
     ) {
+        // 就近吸附到 30/60/90/120 四档
+        val snapped =
+            when {
+                fps >= 105 -> 120
+                fps >= 75 -> 90
+                fps >= 45 -> 60
+                else -> 30
+            }
         context
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
-            .putInt(KEY_FPS, if (fps >= 60) 60 else 30)
+            .putInt(KEY_FPS, snapped)
             .apply()
     }
 

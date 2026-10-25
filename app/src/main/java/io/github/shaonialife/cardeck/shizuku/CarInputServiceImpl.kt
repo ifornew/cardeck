@@ -7,6 +7,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.InputDevice
 import android.view.InputEvent
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
 import java.lang.reflect.Method
@@ -188,6 +189,71 @@ class CarInputServiceImpl(
         if (!inject(down, displayId)) return false
         val up = build(now, now + 50, MotionEvent.ACTION_UP, x.toFloat(), y.toFloat()) ?: return false
         return inject(up, displayId)
+    }
+
+    /** 方控按键：KeyEvent 同为 InputEvent，走同一条 injectInputEvent 通道（setDisplayId 隐藏 API 通用）。 */
+    override fun key(
+        displayId: Int,
+        keyCode: Int,
+    ): Boolean {
+        val inj = injector ?: return false
+        val now = SystemClock.uptimeMillis()
+        return try {
+            val m = inj.method
+            listOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP).all { action ->
+                val event = KeyEvent(now, now, action, keyCode, 0)
+                setDisplayIdMethod?.invoke(event, displayId)
+                val ok =
+                    when {
+                        m.parameterTypes.size == 2 -> m.invoke(inj.receiver, event, 2) as Boolean
+                        m.parameterTypes[2] == java.lang.Long.TYPE -> m.invoke(inj.receiver, event, 2, 0L) as Boolean
+                        else -> m.invoke(inj.receiver, event, 2, displayId) as Boolean
+                    }
+                ok
+            }
+        } catch (t: Throwable) {
+            Log.d(TAG, "key 注入异常 keyCode=$keyCode", t)
+            false
+        }
+    }
+
+    /** 旋钮滚动：ACTION_SCROLL + AXIS_VSCROLL，source 用旋转编码器（车机旋钮的本来面目）。 */
+    override fun scroll(
+        displayId: Int,
+        x: Int,
+        y: Int,
+        vSteps: Float,
+    ): Boolean {
+        val now = SystemClock.uptimeMillis()
+        val props =
+            MotionEvent.PointerProperties().apply {
+                id = 0
+                toolType = MotionEvent.TOOL_TYPE_FINGER
+            }
+        val coords =
+            MotionEvent.PointerCoords().apply {
+                this.x = x.toFloat()
+                this.y = y.toFloat()
+                setAxisValue(MotionEvent.AXIS_VSCROLL, vSteps)
+            }
+        val event =
+            MotionEvent.obtain(
+                now,
+                now,
+                MotionEvent.ACTION_SCROLL,
+                1,
+                arrayOf(props),
+                arrayOf(coords),
+                0,
+                0,
+                1f,
+                1f,
+                0,
+                0,
+                InputDevice.SOURCE_ROTARY_ENCODER,
+                0,
+            )
+        return inject(event, displayId)
     }
 
     override fun swipe(
