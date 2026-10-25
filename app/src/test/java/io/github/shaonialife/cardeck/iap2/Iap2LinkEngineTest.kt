@@ -223,6 +223,60 @@ class Iap2LinkEngineTest {
         assertEquals(emitted.sorted(), emitted)
     }
 
+    /**
+     * 车机重连后保留序号记忆：SYN 的 ack 指向「它期望我们的下一个序号」，回显必须
+     * 接上这个序号。否则回显会和上一轮同序号、被车机当重复帧丢弃，数据帧在协商
+     * 完成前又会被忽略——双方死锁（2026-10-25 15:13:42 实车：车机 SYN ack=101
+     * 连发 4 次，我们的 SYN|ACK seq=100 全部被丢，等不到 0x1d01）。
+     */
+    @Test
+    fun synEchoAdoptsPeersAckOnReconnect() {
+        val phone = Iap2LinkEngine()
+        phone.startResponder(0)
+        phone.takeOutput() // marker（应答者模式不发 SYN）
+
+        phone.feed(synFrame(peerSequence = 4, peerAck = 101), 1)
+        val synAck =
+            parseFrames(phone.takeOutput()).single { it.control == 0xC0 }
+        assertEquals("回显序号必须接上车机的期望值", 101, synAck.sequence)
+        assertEquals("仍要确认车机的 SYN 序号", 4, synAck.ack)
+
+        // 后续数据帧从 102 起，不与车机期待的 101 撞号
+        phone.sendControl(byteArrayOf(0x1D, 0x00), 2)
+        val data = parseFrames(phone.takeOutput()).first { it.control == 0x40 }
+        assertEquals(102, data.sequence)
+    }
+
+    /**
+     * 车机 ACK 推进接收水位后，**不能**再重放同一帧旧 SYN|ACK。
+     *
+     * 2026-10-25 15:54:57 实车：车机 SYN seq=108 → 我们 SYN|ACK seq=100 + 0x1d00
+     * seq=101 → 车机 ACK ack=101 → 车机每秒重发 SYN seq=108 ack=101，我们 15 轮
+     * 全部重放 seq=100 的旧回显（已被车机当过期帧丢弃），一直到链路拆掉都没换回
+     * 0x1d01。水位越过回显时必须消耗新序号重发。
+     */
+    @Test
+    fun repeatedSynGetsFreshEchoOncePeerAckPassesIt() {
+        val phone = Iap2LinkEngine()
+        phone.startResponder(0)
+        phone.takeOutput() // marker（应答者模式不发 SYN）
+
+        phone.feed(synFrame(peerSequence = 108), 1)
+        assertEquals(100, parseFrames(phone.takeOutput()).single { it.control == 0xC0 }.sequence)
+
+        phone.sendControl(Iap2Csm.encode(0x1D00), 2)
+        assertEquals(101, parseFrames(phone.takeOutput()).single { it.control == 0x40 }.sequence)
+
+        // 车机 ACK：回显(100) 与 0x1d00(101) 都收到了
+        phone.feed(ackFrame(peerSequence = 108, peerAck = 101), 3)
+
+        // 车机重发同一个 SYN，此时它的水位 101 已经越过我们的旧回显 100
+        phone.feed(synFrame(peerSequence = 108, peerAck = 101), 4)
+        val echo = parseFrames(phone.takeOutput()).single { it.control == 0xC0 }
+        assertEquals("旧回显已被车机收下，必须换新序号", 102, echo.sequence)
+        assertEquals("仍要确认车机 SYN 序号", 108, echo.ack)
+    }
+
     // ---- 工具 ----
 
     private class ParsedFrame(
@@ -271,17 +325,41 @@ class Iap2LinkEngineTest {
      * 帧头是 **9 字节**：`FF5A | u16 长度 | u8 控制 | u8 seq | u8 ack | u8 会话 | u8 头校验和`，
      * 所以 seq 在帧内偏移 5、头校验和在偏移 8（不是 7——那一位是会话 ID）。
      */
-    private fun synFrame(peerSequence: Int): ByteArray {
+    private fun synFrame(
+        peerSequence: Int,
+        peerAck: Int = 0,
+    ): ByteArray {
         val engine = Iap2LinkEngine()
         engine.start(0)
         val raw = engine.takeOutput()
         val synOffset = 6 // 前置 marker 6 字节
         raw[synOffset + 5] = peerSequence.toByte()
+        raw[synOffset + 6] = peerAck.toByte()
         // 头校验和 = 前 8 字节之和的补码
         var sum = 0
         for (index in synOffset until synOffset + 8) sum += raw[index].toInt() and 0xFF
         raw[synOffset + 8] = (-sum and 0xFF).toByte()
         return raw
+    }
+
+    /** 构造车机侧的裸 ACK 帧（9 字节头，无载荷）。 */
+    private fun ackFrame(
+        peerSequence: Int,
+        peerAck: Int,
+    ): ByteArray {
+        val frame = ByteArray(9)
+        frame[0] = 0xFF.toByte()
+        frame[1] = 0x5A
+        frame[2] = 0
+        frame[3] = 9
+        frame[4] = 0x40
+        frame[5] = peerSequence.toByte()
+        frame[6] = peerAck.toByte()
+        frame[7] = 0
+        var sum = 0
+        for (index in 0 until 8) sum += frame[index].toInt() and 0xFF
+        frame[8] = (-sum and 0xFF).toByte()
+        return frame
     }
 
     private fun exchange(

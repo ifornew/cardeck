@@ -57,6 +57,16 @@ class VideoSender(
     private var encoder: MediaCodec? = null
     private var inputSurface: Surface? = null
     private val running = AtomicBoolean(false)
+
+    /**
+     * 推流是被**对端/网络**打断的（数据口异常：Broken pipe、reset、ENETUNREACH…），
+     * 而不是我们自己收尾。会话结束归因用：这种情况下整链拆解与音频档位无关，
+     * 不能把音频档位记成「不兼容」（2026-10-25 15:54:55 实测误判）。
+     */
+    @Volatile
+    var stoppedByPeer = false
+        private set
+
     private var frameCounter = 0L
     private var configSent = false
 
@@ -262,6 +272,7 @@ class VideoSender(
         } catch (error: Exception) {
             // 视频数据口断开（如接收端屏幕关闭收摊会话）：只终止推流，绝不冒泡——
             // 后台线程未捕获异常会杀死整个进程（曾导致锁屏后 app 消失）
+            stoppedByPeer = true
             log("VIDEO: 推流中止 - ${error.message}（等待接收端恢复后重连）")
         } finally {
             stop()

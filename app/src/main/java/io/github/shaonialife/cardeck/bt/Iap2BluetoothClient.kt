@@ -35,6 +35,12 @@ class Iap2BluetoothClient(
     private val onEndpointUpdate: (Iap2SenderSession.CarPlayEndpoint) -> Unit = {},
     /** 目标车机（动态读取：选择后无需重启链路，下一轮尝试即生效）。 */
     private val targetProvider: () -> TargetDevicePrefs.Target? = { null },
+    /**
+     * 本轮是否已收到过车机回连（…cafe 主路径）。为 true 时客户端**不再主动拨号**：
+     * BMW 实测 …caff 方向必被 DM，而每轮兜底都要先断开 HFP/A2DP——那正是车机回连
+     * 的触发前提，反复断开只会把车机的配对/重连窗口掐掉。
+     */
+    private val inboundSeen: () -> Boolean = { false },
 ) {
     companion object {
         /**
@@ -207,6 +213,7 @@ class Iap2BluetoothClient(
         /** 配置文件「本轮在线」的起点；每次上线都会重置宽限基准（见下方说明）。 */
         var profilesOnlineSince: Long? = null
         var graceOpenedLogged = false
+        var inboundOnlyLogged = false
         while (running && generation.get() == myGeneration) {
             // 静默降噪（2026-10-10 用户实测后启用）——会话期间完全静默，不产生任何连接尝试/日志：
             //  - inboundActive：接收端正在连我们（两条 RFCOMM 会互相踩；Audi 实测双会话混乱）
@@ -214,6 +221,22 @@ class Iap2BluetoothClient(
             //    典型场景：连着 Redmi/DiPlay 时不再无脑探测车机 Audi（消除日志噪音与蓝牙churn）；
             //    会话结束（任一端 BT 会话终结 / 手动断开）时自动恢复。
             if (BtSessionGate.inboundActive || BtSessionGate.sessionActive) {
+                sleepQuietly(2_000)
+                continue
+            }
+            // 本轮已成功回连过（车机走 iPhone 形态）→ 只保持监听。
+            // BMW 82772 实测：…caff 方向 100% 被 DM；而兜底每轮都会先断开 HFP/A2DP，
+            // 那正是车机回连 …cafe 的触发前提——「断开→拨号→失败」循环会把车机的
+            // 配对/重连窗口全部掐掉（2026-10-25：首次配对反复失败、车机把手机移出
+            // 配对列表，用户手动「取消连接→启动连接」才恢复）。回连过一次就不再拨。
+            if (inboundSeen()) {
+                if (!inboundOnlyLogged) {
+                    inboundOnlyLogged = true
+                    log(
+                        "BT-C: 车机已成功回连过——转为只等回连，不再主动拨 …caff" +
+                            "（避免反复断开 HFP 干扰车机配对窗口）",
+                    )
+                }
                 sleepQuietly(2_000)
                 continue
             }

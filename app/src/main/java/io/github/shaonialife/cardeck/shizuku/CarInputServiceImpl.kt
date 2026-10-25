@@ -253,7 +253,28 @@ class CarInputServiceImpl(
                 InputDevice.SOURCE_ROTARY_ENCODER,
                 0,
             )
-        return inject(event, displayId)
+        if (inject(event, displayId)) return true
+        // 个别 ROM（EMUI）会拒绝 ROTARY_ENCODER 源的 ACTION_SCROLL——injectInputEvent
+        // 在排入队列前就返回 false。车机旋钮在接收端看来与鼠标滚轮等价，换
+        // SOURCE_MOUSE 重试一次（2026-10-25 实车：iDrive 旋钮全部「注入失败」）。
+        val mouse =
+            MotionEvent.obtain(
+                now,
+                now,
+                MotionEvent.ACTION_SCROLL,
+                1,
+                arrayOf(props),
+                arrayOf(coords),
+                0,
+                0,
+                1f,
+                1f,
+                0,
+                0,
+                InputDevice.SOURCE_MOUSE,
+                0,
+            )
+        return inject(mouse, displayId)
     }
 
     override fun swipe(

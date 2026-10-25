@@ -445,7 +445,12 @@ class AirPlayClient(
         failAllPending("控制通道关闭")
         runCatching { iapTunnel?.socket?.close() }
         iapTunnel = null
-        iapLink = null
+        // 虚拟 iAP2 链路必须连同节拍线程一起停：只置空引用的话未确认帧会在
+        // 死通道上继续重传，十几秒后才以 packet N not acknowledged 自杀。
+        synchronized(this) {
+            iapLink?.stop()
+            iapLink = null
+        }
         // 注意：controlIapTx 不在这里 shutdown——close() 会被同实例的重试路径
         // （retryWithPairing 等）复用，杀掉执行器会废掉重连后的 MIB3 出站；
         // 守护线程常驻的代价可忽略（每客户端实例一根）
@@ -2531,6 +2536,13 @@ class AirPlayClient(
         } finally {
             // 只由「当前」读线程清账：重连会换 socket 与新读线程，旧线程不得误伤新会话
             if (generation == readerGeneration) {
+                // 控制通道 EOF：iAP2 隧道链路随之下线。不停的话节拍线程会继续在死
+                // 通道上重传未确认帧（每 4s 一条 POST 失败），16~20s 后才自杀——
+                // 2026-10-25 15:54:56 控制通道结束、15:55:16 才报 packet 102 的实测。
+                synchronized(this) {
+                    iapLink?.stop()
+                    iapLink = null
+                }
                 failAllPending("控制通道读线程结束")
             }
         }

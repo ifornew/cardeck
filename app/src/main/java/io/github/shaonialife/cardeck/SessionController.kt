@@ -18,6 +18,7 @@ import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
 import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
 import io.github.shaonialife.cardeck.input.ConsumerKeys
 import io.github.shaonialife.cardeck.input.KnobKeys
+import io.github.shaonialife.cardeck.input.KnobNav
 import io.github.shaonialife.cardeck.input.TouchReports
 import io.github.shaonialife.cardeck.input.TouchRouter
 import io.github.shaonialife.cardeck.launcher.VirtualLauncher
@@ -374,6 +375,9 @@ object SessionController {
                     onWifiCredentials = wifiCredentialHook,
                     onEndpointUpdate = { endpoint -> onLateEndpoint(endpoint, "主动连车机") },
                     targetProvider = targetProvider,
+                    // 车机回连过就不再主动拨 …caff：BMW 该方向必被 DM，而兜底会
+                    // 反复断开 HFP/A2DP（车机回连的触发前提），反而让配对/重连窗口失效。
+                    inboundSeen = { bluetoothServer?.inboundAccepted == true },
                 )
             ctrlAdvertiser = CarPlayCtrlAdvertiser(context) { line -> appendLog(line) }
             endpointBrowser =
@@ -624,6 +628,12 @@ object SessionController {
         )
         val result =
             synchronized(wifiBindLock) {
+                // 「网络已在位」不能只看引用非空：华为 EMUI 在无互联网的应用专属网络上
+                // ~70s 后会静默把 WLAN 切回仅扫描（2026-10-25 12:49:02 实测
+                // CMD_WIFI_TOGGLED → ScanOnlyModeState），onLost 不回调、boundNetwork
+                // 残留——后续每轮只打印「网络已在位」跳过加入，socket 一路 ENONET。
+                // 先请系统确认该网络仍在，失效则就地释放，逼出一次真正的重新加入。
+                if (!connector.ensureNetworkAlive()) boundCarSsid = null
                 val existing = connector.currentNetwork
                 if (boundCarSsid == wifi.ssid && existing != null) {
                     appendLog("WIFI: 网络已在位——跳过重复加入")
@@ -934,10 +944,12 @@ object SessionController {
     private fun bindCarWifiAndRegister(ssid: String): Boolean {
         var bound = false
         synchronized(wifiBindLock) {
-            // 另一个路径已经绑定同一热点：别再走一遍 release+requestNetwork
-            if (boundCarSsid == ssid && wifiConnector?.currentNetwork != null) {
+            // 另一个路径已经绑定同一热点：别再走一遍 release+requestNetwork。
+            // 必须核验系统是否仍承认该网络——EMUI 静默回收应用专属网络后引用会残留。
+            if (boundCarSsid == ssid && wifiConnector?.isCurrentNetworkAlive() == true) {
                 bound = true
             } else {
+                boundCarSsid = null
                 val latch = java.util.concurrent.CountDownLatch(1)
                 wifiConnector?.bindCurrentWifi { ok ->
                     bound = ok
@@ -1260,7 +1272,7 @@ object SessionController {
      *
      * 注意只在「确实起过音频」时归因；纯视频会话结束不做任何记忆改写。
      */
-    private fun attributeAudioTeardown() {
+    private fun attributeAudioTeardown(stoppedByPeer: Boolean) {
         val profile = activeAudioProfile ?: return
         val startedAt = activeAudioStartedAt
         val identity = activeAudioReceiverKey
@@ -1269,6 +1281,16 @@ object SessionController {
         activeAudioProfile = null
         activeAudioStartedAt = 0L
         if (startedAt == 0L || identity.isBlank()) return
+        // 视频数据口先被对端拆掉（Broken pipe / reset / 网络不可达）时，整链收摊与音频
+        // 无关——此时按存活时长反推会把唯一可用档位误判成不兼容（2026-10-25 15:48:05
+        // 与 15:54:55 两次实测：VIDEO 先失败，随后把 t102/media 记入黑名单）。
+        if (stoppedByPeer) {
+            appendLog(
+                "AUDIO: 档位 ${profile.label} 起流 ${lived.coerceAtLeast(0) / 1000}s 后被拆——" +
+                    "本次是视频/网络侧先断开（不归因于音频档位，记忆不改）",
+            )
+            return
+        }
         val ctx = appContext?.applicationContext
         if (lived >= AUDIO_PROFILE_PROBE_MS) {
             AudioProfileMemory.recordWorking(ctx, identity, profile.key)
@@ -1878,10 +1900,24 @@ object SessionController {
                                             knobButtonStates[uuid] = nowBits
                                             val knobDisplay = VirtualLauncher.appDisplayId
                                             if (event.confirm && prevBits and 1 == 0) {
+                                                // 桌面在场走进程内派发（虚拟屏不接受 Shizuku 键注入：
+                                                // injectInputEvent 对 DPAD 也返回 false），否则回退注入
+                                                val handled = KnobNav.press()
                                                 val ok =
-                                                    knobDisplay >= 0 &&
-                                                        CarInputClient.service?.key(knobDisplay, KeyEvent.KEYCODE_DPAD_CENTER) == true
-                                                appendLog("EVENT: 方控确认键 → DPAD_CENTER " + if (ok) "已注入" else "注入失败")
+                                                    handled ||
+                                                        (knobDisplay >= 0 &&
+                                                            CarInputClient.service?.key(
+                                                                knobDisplay,
+                                                                KeyEvent.KEYCODE_DPAD_CENTER,
+                                                            ) == true)
+                                                appendLog(
+                                                    "EVENT: 方控确认键 → " +
+                                                        when {
+                                                            handled -> "打开选中项"
+                                                            ok -> "DPAD_CENTER 已注入"
+                                                            else -> "注入失败"
+                                                        },
+                                                )
                                             }
                                             if (event.back && prevBits and 2 == 0) {
                                                 val ok =
@@ -1890,21 +1926,50 @@ object SessionController {
                                                 appendLog("EVENT: 方控返回键 → BACK " + if (ok) "已注入" else "注入失败")
                                             }
                                             if (event.wheelDelta != 0) {
-                                                // 方向约定（待实车校准）：BMW 报告正增量暂定映射为
-                                                // AXIS_VSCROLL 正（向下滚）；反了改这里的符号。
+                                                // 旋钮旋转 → 桌面进程内派发（GridActivity 注册的
+                                                // KnobNav）：光标在应用列表内 → 移动选中格；越过
+                                                // 列表边界 → 左右翻页。方向约定：正增量=顺时针=下一项。
+                                                //
+                                                // 不能靠 Shizuku 注入：虚拟屏不接受 injectInputEvent
+                                                // 的键/滚动事件（ACTION_SCROLL 与 DPAD_* 均返回 false，
+                                                // 触摸正常），桌面在场时直接走进程内回调；桌面不在
+                                                // （其他 App 前台）才回退方向键注入。
+                                                val sign = if (event.wheelDelta > 0) 1 else -1
+                                                // 一格一格走：相对滚轮一齿通常 ±1，连转也只按齿数发，
+                                                // 上限 3 防一次性甩飞
+                                                val steps = event.wheelDelta.let { if (it < 0) -it else it }
+                                                    .coerceIn(1, 3)
+                                                var consumed = 0
+                                                while (consumed < steps && KnobNav.rotate(sign)) consumed++
+                                                val dispatched = consumed > 0
+                                                var svc = if (dispatched) null else CarInputClient.service
+                                                if (!dispatched && svc == null) {
+                                                    CarInputClient.ensure(context)
+                                                    svc = CarInputClient.service
+                                                }
+                                                val keyCode =
+                                                    if (sign > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
                                                 val ok =
-                                                    knobDisplay >= 0 &&
-                                                        CarInputClient.service?.scroll(
-                                                            knobDisplay,
-                                                            VirtualLauncher.appAreaWidth / 2,
-                                                            VirtualLauncher.appHeightPx / 2,
-                                                            event.wheelDelta.toFloat(),
-                                                        ) == true
+                                                    dispatched ||
+                                                        (
+                                                            knobDisplay >= 0 &&
+                                                                svc != null &&
+                                                                (0 until steps).all {
+                                                                    svc!!.key(knobDisplay, keyCode)
+                                                                }
+                                                        )
                                                 if (knobScrollLogCount < 20) {
                                                     knobScrollLogCount++
                                                     appendLog(
-                                                        "EVENT: 方控滚轮 delta=${event.wheelDelta} → 滚动 " +
-                                                            if (ok) "已注入" else "注入失败",
+                                                        "EVENT: 方控滚轮 delta=${event.wheelDelta} → " +
+                                                            "${if (sign > 0) "NEXT" else "PREV"}×$steps " +
+                                                            when {
+                                                                dispatched -> "已派发桌面"
+                                                                ok -> "方向键已注入"
+                                                                else ->
+                                                                    "注入失败（display=$knobDisplay，" +
+                                                                        "注入服务=${if (svc != null) "在线" else "离线"}）"
+                                                            },
                                                     )
                                                 }
                                             }
@@ -2058,12 +2123,22 @@ object SessionController {
                                         ((setup.displayWidth * scale).toInt().coerceAtLeast(320) / 2) * 2
                                     val streamH =
                                         ((setup.displayHeight * scale).toInt().coerceAtLeast(180) / 2) * 2
-                                    val fps =
+                                    val prefFps =
                                         appContext
                                             ?.let {
                                                 DisplayPrefs
                                                     .fps(it)
                                             } ?: 30
+                                    // /info displays[0].maxFPS 是车机显示能力的上限
+                                    // （BMW 82772 实测 60）。用户偏好选到 120 时编码器与
+                                    // 合成器仍按 120 出帧，车机刷新跟不上——白耗带宽与
+                                    // 编码器算力，链路上大量无效帧。按接收端上限夹紧。
+                                    val maxFps = setup.maxFps
+                                    val fps =
+                                        if (maxFps in 24..240) prefFps.coerceAtMost(maxFps) else prefFps
+                                    if (fps != prefFps) {
+                                        appendLog("DISPLAY: 车机 maxFPS=$maxFps，帧率 $prefFps → $fps")
+                                    }
                                     activeScalePercent = scalePct
                                     activeTargetFps = fps
                                     // 车机触摸在通告视图坐标系（如 1160×540），流已按比例
@@ -2116,7 +2191,24 @@ object SessionController {
                                                 }
                                                 // 音频拆链归因：起过音频却很快被拆 → 记下该档位
                                                 // 不兼容，下次连接自动换档（见 attributeAudioTeardown）。
-                                                attributeAudioTeardown()
+                                                attributeAudioTeardown(
+                                                    stoppedByPeer = videoSender?.stoppedByPeer == true,
+                                                )
+                                                // 推流一结束就核验车机热点是否仍被系统承认：EMUI 会在
+                                                // 无互联网的应用专属网络上 ~70s 后静默切回仅扫描，
+                                                // onLost 不回调、boundNetwork 残留，下一轮车机回连时
+                                                // 只打印「网络已在位」而 socket 全部 ENONET
+                                                // （2026-10-25 12:49:02 实测）。主动释放绑定，
+                                                // 保证下一轮真正重新加入热点而不是复用死引用。
+                                                Bg.run("wifi-health-after-session") {
+                                                    if (wifiConnector?.ensureNetworkAlive() == false) {
+                                                        boundCarSsid = null
+                                                        appendLog(
+                                                            ">>> 推流结束后车机热点已不可用" +
+                                                                "——已释放网络绑定，下轮重新加入",
+                                                        )
+                                                    }
+                                                }
                                             },
                                         )
                                     // 先连端口（车机看门狗），编码器等 RECORD 后再启动
@@ -2152,6 +2244,10 @@ object SessionController {
                                         appendLog(
                                             "MODE: 隐形屏 ${if (ok) "已启动（高德车机版优先）display=${source.displayId}" else "启动失败（Shizuku 就绪？）"}",
                                         )
+                                        // 合成器在 attach 时按用户偏好建（可能高过车机 maxFPS），
+                                        // 这里统一到本会话夹紧后的帧率（activeTargetFps），
+                                        // 避免编码器 60fps 元数据却喂 120fps 帧。
+                                        if (ok) VirtualLauncher.setStreamFps(activeTargetFps)
                                         // 暗幕/常亮只在真正开始投屏后生效（见 ScreenDimmer.sessionActive）：
                                         // 应用启动时只挂触摸探针，避免「会话早断了、手机过一会儿还是变暗」。
                                         if (ok) ScreenDimmer.setSessionActive(true)
@@ -2215,7 +2311,7 @@ object SessionController {
                 endpoint.channel,
                 endpoint.securityType,
             )
-        if (boundCarSsid == endpoint.ssid && wifiConnector?.currentNetwork != null) {
+        if (boundCarSsid == endpoint.ssid && wifiConnector?.isCurrentNetworkAlive() == true) {
             appendLog(">>> [$source] 已绑定车机热点 ${endpoint.ssid}，跳过重复绑定")
             continueWithNetwork(true)
         } else {
@@ -2245,7 +2341,9 @@ object SessionController {
                             // promptSpecifierFailed 内部可能已重试/转手动；两者都会
                             // 通过 joinCarWifiSpecifier → continueWithNetwork 续上流程，
                             // 这里只在彻底失败时结束本轮
-                            if (boundCarSsid == wifiConfig.ssid && wifiConnector?.currentNetwork != null) {
+                            if (boundCarSsid == wifiConfig.ssid &&
+                                wifiConnector?.isCurrentNetworkAlive() == true
+                            ) {
                                 continueWithNetwork(true)
                             } else {
                                 sessionStarting.set(false)

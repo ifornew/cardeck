@@ -3,7 +3,10 @@ package io.github.shaonialife.cardeck.launcher
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.GridLayout
@@ -15,6 +18,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
 import io.github.shaonialife.cardeck.R
+import io.github.shaonialife.cardeck.input.KnobNav
 import io.github.shaonialife.cardeck.media.MediaSessionsState
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
 import io.github.shaonialife.cardeck.render.SPLIT_MAP_WIDTH_RATIO
@@ -52,6 +56,23 @@ class GridActivity : AppCompatActivity() {
     /** 当前行数 / 列数（按屏幕尺寸自适应，分页容量 = columns × rows）。 */
     private var rows = ROWS_MIN
     private var columns = COLUMNS_DEFAULT
+
+    /**
+     * 旋钮/方向键当前选中的格子下标（-1 = 没有光标）。
+     *
+     * 语义（2026-10-25 用户定）：iDrive 旋钮在**应用列表内**转动 → 移动选中格；
+     * 光标越过列表边界、或当前页不是应用页（仪表盘页）→ 左右翻页。
+     */
+    private var selectedIndex = -1
+
+    /** 高亮中的格子视图（换页/重建时按引用清掉）。 */
+    private var highlightView: View? = null
+
+    /**
+     * 翻页后要落到的边界格：0 = 首格，-1 = 末格，[PENDING_NONE] = 不选。
+     * ViewPager2 的选中回调在滚动落定后触发，所以翻页时的落点记在这里等回调消费。
+     */
+    private var pendingSelectBoundary = PENDING_NONE
 
     /** 应用清单缓存（每次 resume 重扫 packageManager 会拖慢回桌面——仅在首次载入时扫描）。 */
     private var appsCache: List<VirtualLauncher.AppEntry>? = null
@@ -394,6 +415,14 @@ class GridActivity : AppCompatActivity() {
             object : ViewPager2.OnPageChangeCallback() {
                 override fun onPageSelected(position: Int) {
                     updateDots(position)
+                    // 翻页落定：清掉旧页高亮，按旋钮方向把光标落在新页的边界格上
+                    clearHighlight()
+                    selectedIndex = -1
+                    if (pendingSelectBoundary != PENDING_NONE) {
+                        val boundary = pendingSelectBoundary
+                        pendingSelectBoundary = PENDING_NONE
+                        pager?.post { selectBoundaryCell(boundary) }
+                    }
                     // 用户滑动切换仪表盘/桌面：回写 launcher（含地图任务与 tile 布局）
                     if (position == 0 && !VirtualLauncher.dashboardMode) VirtualLauncher.showDashboard()
                     if (position != 0 && VirtualLauncher.dashboardMode) VirtualLauncher.showDesktop()
@@ -463,7 +492,31 @@ class GridActivity : AppCompatActivity() {
         // 也覆盖从设置页返回：勾选变化即时反映
         reload()
         refreshWallpaperIfChanged()
+        KnobNav.register(knobListener)
     }
+
+    override fun onPause() {
+        KnobNav.unregister(knobListener)
+        super.onPause()
+    }
+
+    /**
+     * 旋钮导航回调（主控在 HID 读取线程里调，必须切回主线程）。
+     * 桌面不在前台时监听已注销，主控自动回退到按键注入。
+     */
+    private val knobListener =
+        object : KnobNav.Listener {
+            override fun onRotate(direction: Int): Boolean {
+                runOnUiThread { moveByKnob(direction) }
+                return true
+            }
+
+            override fun onPress(): Boolean {
+                if (selectedIndex < 0) return false
+                runOnUiThread { activateSelected() }
+                return true
+            }
+        }
 
     /**
      * 计算格子尺寸与列/行数（自动适配）：
@@ -546,6 +599,10 @@ class GridActivity : AppCompatActivity() {
         pages = listOf(listOf<Cell>(Cell.Dashboard)) + cells.chunked(columns * rows)
 
         val current = pager?.currentItem ?: 0
+        // 数据重建后旧高亮视图已失效（ViewHolder 会复用/销毁），光标复位
+        clearHighlight()
+        selectedIndex = -1
+        pendingSelectBoundary = PENDING_NONE
         pager?.adapter?.notifyDataSetChanged()
         rebuildDots()
         // 位置与仪表盘模式对账（home 键循环/应用启动会改 dashboardMode）：
@@ -731,7 +788,7 @@ class GridActivity : AppCompatActivity() {
     }
 
     private inner class PageHolder(
-        private val grid: GridLayout,
+        val grid: GridLayout,
     ) : RecyclerView.ViewHolder(grid) {
         fun bind(page: Int) {
             grid.removeAllViews()
@@ -769,6 +826,150 @@ class GridActivity : AppCompatActivity() {
                 )
             }
         }
+    }
+
+    /**
+     * iDrive 旋钮 / 方向键导航：一齿一次调用，direction=+1 顺时针。
+     *
+     * 光标在应用列表内 → 移动选中格；选中格已在列表边界还要继续转 → 翻页并落到
+     * 新页的边界格；当前页没有应用格（仪表盘页）→ 直接左右翻页。
+     */
+    private fun moveByKnob(direction: Int) {
+        val pager = pager ?: return
+        val cells = appCellsAt(pager.currentItem)
+        if (cells.isEmpty()) {
+            flipPage(direction)
+            return
+        }
+        if (selectedIndex < 0) {
+            selectCell(if (direction > 0) 0 else cells.lastIndex)
+            return
+        }
+        val next = selectedIndex + direction
+        if (next in cells.indices) {
+            selectCell(next)
+            return
+        }
+        // 越过应用列表边界：翻页，光标落到新页的首格/末格
+        val target = pager.currentItem + direction
+        if (target in pages.indices) {
+            clearHighlight()
+            selectedIndex = -1
+            pendingSelectBoundary = if (direction > 0) 0 else -1
+            pager.setCurrentItem(target, true)
+        }
+    }
+
+    /** 左右翻页（光标不在应用列表里时旋钮的动作）。 */
+    private fun flipPage(direction: Int) {
+        val pager = pager ?: return
+        val last = (pages.size - 1).coerceAtLeast(0)
+        val target = (pager.currentItem + direction).coerceIn(0, last)
+        if (target == pager.currentItem) return
+        clearHighlight()
+        selectedIndex = -1
+        pendingSelectBoundary = PENDING_NONE
+        pager.setCurrentItem(target, true)
+    }
+
+    /** 某页里的应用格（仪表盘页返回空）。 */
+    private fun appCellsAt(page: Int): List<Cell> =
+        pages.getOrNull(page).orEmpty().filter { it !is Cell.Dashboard }
+
+    private fun selectBoundaryCell(boundary: Int) {
+        val cells = appCellsAt(pager?.currentItem ?: return)
+        if (cells.isEmpty()) return
+        selectCell(if (boundary == 0) 0 else cells.lastIndex)
+    }
+
+    private fun selectCell(
+        index: Int,
+        retry: Boolean = true,
+    ) {
+        val grid = currentPageGrid()
+        if (grid == null) {
+            // 新页可能还没布局完：下一帧再试一次
+            if (retry) pager?.post { selectCell(index, false) }
+            return
+        }
+        if (index !in 0 until grid.childCount) return
+        clearHighlight()
+        val view = grid.getChildAt(index)
+        view.foreground = highlight()
+        highlightView = view
+        selectedIndex = index
+    }
+
+    private fun clearHighlight() {
+        highlightView?.foreground = null
+        highlightView = null
+    }
+
+    private fun highlight(): GradientDrawable {
+        val density = resources.displayMetrics.density
+        return GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = 16 * density
+            setColor(0x22FFFFFF)
+            setStroke((2 * density).toInt(), 0xAAFFFFFF.toInt())
+        }
+    }
+
+    /** 当前页的网格容器（仪表盘页/尚未绑定时为 null）。 */
+    private fun currentPageGrid(): GridLayout? {
+        val pager = pager ?: return null
+        val recycler = pager.getChildAt(0) as? RecyclerView ?: return null
+        val holder = recycler.findViewHolderForAdapterPosition(pager.currentItem) as? PageHolder ?: return null
+        return holder.grid
+    }
+
+    /** 旋钮按下：打开光标所在的应用。 */
+    private fun activateSelected() {
+        val index = selectedIndex
+        if (index < 0) return
+        currentPageGrid()?.getChildAt(index)?.performClick()
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                -> {
+                    moveByKnob(1)
+                    return true
+                }
+
+                KeyEvent.KEYCODE_DPAD_LEFT,
+                KeyEvent.KEYCODE_DPAD_UP,
+                -> {
+                    moveByKnob(-1)
+                    return true
+                }
+
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER,
+                -> if (selectedIndex >= 0) {
+                    activateSelected()
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    /** 兜底：某些机型仍会发 ACTION_SCROLL（蓝牙滚轮路径已改发方向键）。 */
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_SCROLL) {
+            val delta =
+                event.getAxisValue(MotionEvent.AXIS_VSCROLL) +
+                    event.getAxisValue(MotionEvent.AXIS_HSCROLL)
+            if (delta != 0f) {
+                moveByKnob(if (delta > 0f) 1 else -1)
+                return true
+            }
+        }
+        return super.onGenericMotionEvent(event)
     }
 
     private fun openSettings() {
@@ -841,5 +1042,8 @@ class GridActivity : AppCompatActivity() {
 
         /** 格子目标高宽比（高/宽）：搜索时最接近此比例的组合胜出。 */
         const val CELL_HEIGHT_RATIO = 1.25f
+
+        /** [pendingSelectBoundary] 的空值：翻页后不自动选格。 */
+        const val PENDING_NONE = Int.MIN_VALUE
     }
 }

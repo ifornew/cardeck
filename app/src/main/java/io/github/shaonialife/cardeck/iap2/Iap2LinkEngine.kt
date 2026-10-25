@@ -418,10 +418,24 @@ class Iap2LinkEngine(
             // 发起方 SYN，属于「它已应答」的信号（见下方 ACK 分支），再回一条就会形成
             // 双方互回 SYN|ACK 的无限乒乓（单测暴露：两个引擎互相喂帧时协商永不收敛）。
             val isPureSyn = (control and CONTROL_ACKNOWLEDGEMENT) == 0
-            if (sync != null && isPureSyn && (state == State.NEGOTIATING || echoFirst)) {
+            // 纯 SYN 一律回 SYN|ACK——**包括已进入 NORMAL 之后的 SYN 重发**：
+            // 车机没接受我们的回显时会持续重发 SYN（1 秒一次），此时我们若因状态
+            // 已是 NORMAL 而静默，双方永远停在「它等回显、我们等它 ACK」的死锁里
+            // （2026-10-25 15:13:43–46 实测：车机连发 4 次 SYN，我们一条都没回）。
+            if (sync != null && isPureSyn && state != State.DEAD) {
                 val firstAdoption = adoptedSynchronization == null
                 peerSynchronization = sync
-                if (firstAdoption) adoptedSynchronization = sync
+                if (firstAdoption) {
+                    adoptedSynchronization = sync
+                    // 车机重连后会保留 iAP2 序号记忆：它 SYN 里的 ack = 「期望我们
+                    // 下一个序号」。新链路引擎默认从 99 起（回显用 100），若上一轮
+                    // 我们已经用到 100，车机就把同序号的 SYN|ACK 当重复帧丢弃，
+                    // 数据帧在协商完成前一律忽略 → 永远等不到 0x1d01
+                    // （2026-10-25 15:13:42 实测：车机 SYN ack=101 连发，我们的
+                    // 回显 seq=100 全部被丢）。首次采纳时把发送游标对齐到车机期望值
+                    // （ack-1，回显正好用 ack），后续数据帧自然接上。
+                    if (ack != 0) sentSequence = (ack - 1) and 0xFF
+                }
                 // Audi 真车实测（2026-10-09，字节级对照）：车机以发起方姿态发 SYN 声明其会话表
                 // {1:control,2:EA}，手机必须「ACK + 原样回显其表（SYN|ACK）」——车机见到回显才发
                 // 最终 ACK 完成协商（只回裸 ACK 时它永不回 ACK）。回显即声明「我采纳你的表」，
@@ -429,6 +443,8 @@ class Iap2LinkEngine(
                 sync.sessions.firstOrNull { it.kind == CONTROL_KIND }?.let {
                     adoptedPeerControlSessionId = it.id
                 }
+                // 每轮 SYN 都以自己的序号重开接收水位（BMW 161→191→40 实测）；重传
+                // 同一 SYN 时序号相同，重复赋值无副作用，但绝不能只在首次采纳时设。
                 lastReceivedInOrder = sequence
                 // **每次** SYN 都只回一帧 SYN|ACK（不回裸 ACK）：
                 //  ① 语义完整：SYN|ACK 自带确认位与 ack 字段，裸 ACK 是冗余的
@@ -538,7 +554,16 @@ class Iap2LinkEngine(
         sync: SynchronizationPayload,
         peerSequence: Int,
     ) {
-        if (lastEchoPeerSequence == peerSequence) {
+        // 车机重发同一个 SYN 时，只有当上一帧回显**仍比车机的接收水位新**才原样重放。
+        // 车机的 ACK 会把它「已收到的序号」推到我们之后发的数据帧上（实测 ack=101：
+        // 回显 100 + 0x1d00 101 都已收到），此时再重放 seq=100 的旧回显会被车机当
+        // 过期帧丢弃——它每秒重发 SYN，我们永远换不回新的 SYN|ACK，
+        // 协商卡死（2026-10-25 15:54:57–15:55:15 实测，15 轮原地踏步）。
+        // 水位已越过回显 → 消耗一个新序号重发，让车机看到一帧「新」的同步。
+        val acked = lastSentAcknowledged
+        val echoAlreadyReceived =
+            acked != null && ((acked - lastEchoOwnSequence) and 0xFF) <= 0x7F
+        if (lastEchoPeerSequence == peerSequence && !echoAlreadyReceived) {
             writePacket(ownSyncOf(sync).encode(), lastEchoOwnSequence, CONTROL_SYNCHRONIZE or CONTROL_ACKNOWLEDGEMENT, 0)
             onSynchronizationEchoSent?.invoke()
             return

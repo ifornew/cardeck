@@ -56,6 +56,10 @@ class VirtualIap2Link(
     private var eaCount = 0
     private var started = false
 
+    /** 宿主已显式拆除（[stop]）；节拍线程据此立即退出，不再向死通道重传。 */
+    @Volatile
+    private var stopped = false
+
     // ---- DiPlay 隧道路径状态 ----
     private var tunnelCsmStarted = false
     private var tunnelIdentified = false
@@ -154,7 +158,7 @@ class VirtualIap2Link(
         engine.onSynchronizationEchoSent = { pendingEchoFlush = true }
         Thread(
             {
-                while (alive()) {
+                while (!stopped && alive()) {
                     try {
                         Thread.sleep(200)
                     } catch (_: InterruptedException) {
@@ -221,6 +225,25 @@ class VirtualIap2Link(
                 "——等车机同步包（FF5A）",
         )
         drainLocked()
+    }
+
+    /**
+     * 会话结束拆除：停节拍线程并让引擎立即判死。
+     *
+     * 宿主只把引用置空是不够的——`alive()` 看的是 socket 对象是否 isClosed，
+     * 控制通道读线程 EOF 后 socket 对象仍未关闭，节拍线程会继续把未确认帧
+     * 每 4 秒往死通道 POST 一次，16~20 秒后才以
+     * `IAPLINK: 虚拟链路终止 - packet N not acknowledged` 自杀
+     * （2026-10-25 15:54:56 控制通道结束 → 15:55:16 才死，日志伴 4 次
+     * `控制通道 POST 失败 - Broken pipe`）。改为随控制通道结束立刻收尾。
+     */
+    fun stop() {
+        synchronized(lock) {
+            if (stopped) return
+            stopped = true
+            engine.feedEof()
+            drainLocked()
+        }
     }
 
     /** 车机链路字节入口（事件通道 iAPSendMessage 的 data）。 */

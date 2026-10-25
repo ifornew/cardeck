@@ -52,6 +52,14 @@ class Iap2BluetoothServer(
     @Volatile
     private var running = false
 
+    /**
+     * 本次运行是否已有车机成功回连过（…cafe 主路径）。
+     * 供 [Iap2BluetoothClient] 判断「这台车机走回连、无需主动拨号」。
+     */
+    @Volatile
+    var inboundAccepted = false
+        private set
+
     val isRunning: Boolean get() = running
 
     fun hasPermission(): Boolean =
@@ -125,6 +133,10 @@ class Iap2BluetoothServer(
                 continue
             }
             log("BT: 接收端已连入 name=$peerName，开始 iAP2 发送端会话")
+            // 记下「本轮成功回连过」：Iap2BluetoothClient 据此停止主动拨 …caff 的
+            // 兜底（BMW 实测该方向必被 DM，反复拨号只会不停断开 HFP、干扰车机的
+            // 配对/回连窗口）。
+            inboundAccepted = true
             Thread({ runSession(socket) }, "iap2-bt-session").apply {
                 isDaemon = true
                 start()

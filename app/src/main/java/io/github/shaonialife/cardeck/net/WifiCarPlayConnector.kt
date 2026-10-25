@@ -55,6 +55,10 @@ class WifiCarPlayConnector(
     val currentNetwork: Network? get() = boundNetwork.get()
     private val boundNetwork = AtomicReference<Network?>(null)
 
+    /** 最近一次加入的 SSID（[ensureNetworkAlive] 回调 [onNetworkLost] 时用）。 */
+    @Volatile
+    private var lastSsid: String? = null
+
     /**
      * 应用专属网络被系统断开（热点关闭/离开范围）时回调。会话层据此提示用户；
      * 空实现 = 不关心（例如手动绑定路径）。
@@ -121,6 +125,41 @@ class WifiCarPlayConnector(
     }
 
     /**
+     * 绑定网络是否仍被系统承认（存在且仍是 WiFi 传输）。
+     *
+     * 不能只看 [currentNetwork] 非空：华为 EMUI 在「无互联网」的应用专属网络上
+     * 约 70s 后会静默把 WLAN 切回仅扫描（2026-10-25 12:49:02 实测
+     * `CMD_WIFI_TOGGLED` → `ScanOnlyModeState`），此时 **onLost 不回调**，
+     * `boundNetwork` 引用残留，后续 socket 全部 `ENONET`。
+     */
+    fun isCurrentNetworkAlive(): Boolean {
+        val network = boundNetwork.get() ?: return false
+        return try {
+            connectivityManager
+                .getNetworkCapabilities(network)
+                ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 核验绑定网络；已被系统回收时就地释放绑定并回调 [onNetworkLost]。
+     *
+     * @return true = 绑定仍然可用；false = 没有绑定/已失效（调用方应重新加入热点）
+     */
+    fun ensureNetworkAlive(): Boolean {
+        if (boundNetwork.get() == null) return false
+        if (isCurrentNetworkAlive()) return true
+        val ssid = lastSsid.orEmpty()
+        log("WiFi: 绑定网络已被系统回收（onLost 未回调）——释放绑定，下一轮重新加入 \"$ssid\"")
+        // release() 内部会因 boundNetwork 非空而 bindProcessToNetwork(null)
+        release()
+        onNetworkLost?.invoke(ssid)
+        return false
+    }
+
+    /**
      * 用应用专属网络（WifiNetworkSpecifier）加入车机热点。
      *
      * 阻塞直到连接成功/系统拒绝/超时（内部 200ms 分片，[isCancelled] 可即时退出）。
@@ -141,6 +180,7 @@ class WifiCarPlayConnector(
             buildSpecifier(ssid, passphrase, securityType)
                 ?: return JoinResult.Unsupported
         release()
+        lastSsid = ssid
         val request =
             NetworkRequest
                 .Builder()
