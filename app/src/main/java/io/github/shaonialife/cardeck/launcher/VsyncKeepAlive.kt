@@ -22,10 +22,31 @@ import android.widget.FrameLayout
  * （透明清屏）。显示屏持续有产出 → SurfaceFlinger 保持 VSYNC 流动 → 正常 invalidate
  * 即时绘制。代价约等于零（1 像素、1Hz）。真实显示屏（手机主屏）VSYNC 由硬件产生，
  * 无需保活——install() 按 displayId 自动跳过。
+ *
+ * 2026-10-25 追加：空闲整页重绘（[onIdleRefresh]）。虚拟屏长时间无触摸时，卡片上的
+ * 裁剪层（clipToOutline）/模糊层（RenderEffect）会被系统回收、渲染成纯黑块，触摸
+ * 才恢复（用户实测「音乐卡/地图卡不触摸一段时间就变黑」）。每 [IDLE_REFRESH_MS]
+ * 无交互就整页 invalidate 一次，强制这些层重建；交互期间不打扰（省电、避免干扰
+ * 正在操作的应用）。
  */
 class VsyncKeepAlive(
     private val activity: Activity,
 ) {
+    /**
+     * 空闲整页重绘回调（可选）。调用方应在其中 invalidate 根视图；本类保证只在
+     * 距上次 [noteInteraction] ≥ [IDLE_REFRESH_MS] 时触发。
+     */
+    var onIdleRefresh: (() -> Unit)? = null
+
+    /** 最近一次用户交互时间（uptimeMillis）；[noteInteraction] 由 Activity 转发。 */
+    @Volatile
+    private var lastInteractionAt = android.os.SystemClock.uptimeMillis()
+
+    /** 记录一次用户交互（Activity.onUserInteraction 转发），推迟空闲重绘。 */
+    fun noteInteraction() {
+        lastInteractionAt = android.os.SystemClock.uptimeMillis()
+    }
+
     private var surfaceView: SurfaceView? = null
     private val handler = Handler(Looper.getMainLooper())
 
@@ -37,6 +58,8 @@ class VsyncKeepAlive(
             override fun run() {
                 if (!running) return
                 poke()
+                val idleMs = android.os.SystemClock.uptimeMillis() - lastInteractionAt
+                if (idleMs >= IDLE_REFRESH_MS) onIdleRefresh?.invoke()
                 handler.postDelayed(this, INTERVAL_MS)
             }
         }
@@ -47,6 +70,10 @@ class VsyncKeepAlive(
                 running = true
                 handler.removeCallbacks(tick)
                 handler.post(tick)
+                // 诊断：确认保活循环在虚拟屏上真的跑起来了（否则空闲重绘不会发生）
+                VirtualLauncher.logSink?.invoke(
+                    "VSYNC: 保活启动 display=${activity.display?.displayId}",
+                )
             }
 
             override fun surfaceChanged(
@@ -59,6 +86,8 @@ class VsyncKeepAlive(
             override fun surfaceDestroyed(holder: SurfaceHolder) {
                 running = false
                 handler.removeCallbacks(tick)
+                // 诊断：保活中断后「空闲重绘」也会一起停——出现此日志可解释变黑原因
+                VirtualLauncher.logSink?.invoke("VSYNC: 保活停止（surface 销毁）")
             }
         }
 
@@ -117,5 +146,8 @@ class VsyncKeepAlive(
     private companion object {
         /** 保活节拍：1Hz 足以让 SurfaceFlinger 认定显示屏持续活跃。 */
         const val INTERVAL_MS = 1000L
+
+        /** 无交互多久后开始整页重绘（用户实测 1 分钟内变黑，3s 足够跑在变黑之前）。 */
+        const val IDLE_REFRESH_MS = 3_000L
     }
 }

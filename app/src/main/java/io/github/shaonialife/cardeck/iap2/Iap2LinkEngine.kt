@@ -528,6 +528,18 @@ class Iap2LinkEngine(
     var onSynchronizationEchoSent: (() -> Unit)? = null
 
     /**
+     * 已回显 SYN|ACK 的次数（含原样重放）。
+     *
+     * 会话层用它识别「对端在上层消息等待期间重新协商了链路」：车机重发 SYN 时，
+     * 同步边界**之前**发出的 0x1D00 会被它当成未同步数据丢弃（2026-10-25 失败轮
+     * 实测：车机 ACK 了 seq=101 的 0x1D00 却始终不回 0x1D01，随后彻底静默）。
+     * 此时必须重新发一遍识别请求，否则整轮 bring-up 永远等不到车机身份。
+     */
+    @Volatile
+    var synchronizationEchoCount: Int = 0
+        private set
+
+    /**
      * 回显对端 sync（SYN|ACK，载荷与对端完全一致）——声明「手机采纳车机会话表」。
      *
      * **必须消耗一个新发送序号**：对端按自己的序号账法校验回包（catplay
@@ -565,6 +577,7 @@ class Iap2LinkEngine(
             acked != null && ((acked - lastEchoOwnSequence) and 0xFF) <= 0x7F
         if (lastEchoPeerSequence == peerSequence && !echoAlreadyReceived) {
             writePacket(ownSyncOf(sync).encode(), lastEchoOwnSequence, CONTROL_SYNCHRONIZE or CONTROL_ACKNOWLEDGEMENT, 0)
+            synchronizationEchoCount++
             onSynchronizationEchoSent?.invoke()
             return
         }
@@ -572,6 +585,7 @@ class Iap2LinkEngine(
         writePacket(ownSyncOf(sync).encode(), ownSequence, CONTROL_SYNCHRONIZE or CONTROL_ACKNOWLEDGEMENT, 0)
         lastEchoPeerSequence = peerSequence
         lastEchoOwnSequence = ownSequence
+        synchronizationEchoCount++
         onSynchronizationEchoSent?.invoke()
     }
 

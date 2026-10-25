@@ -125,6 +125,12 @@ class Iap2SenderSession(
         /** 等 StartHID 的窗口：xcertplay 会发（订阅后立即到），DiPlay 不发。 */
         const val HID_WAIT_NANOS = 2_000_000_000L
 
+        /** 等车机身份时的分片窗口：每片结束后检查链路是否重新协商过（见 expectIdentification）。 */
+        const val RESYNC_POLL_NANOS = 1_500_000_000L
+
+        /** 识别请求最多补发次数（防车机持续重发 SYN 时无限重发）。 */
+        const val MAX_IDENTIFICATION_RESENDS = 2
+
         /**
          * 设备侧自报身份（对照 catplay 的 iPhone persona：`_device-info` model=D84AP）。
          * 车机（BMW 尤其严格）用这些字段 + 收/发消息清单判定「这台设备支持 CarPlay」。
@@ -181,7 +187,7 @@ class Iap2SenderSession(
 
         // ---- 识别 ----
         send(Iap2MessageIds.START_IDENTIFICATION)
-        val identification = expect(Iap2MessageIds.IDENTIFICATION_INFORMATION, deadline)
+        val identification = expectIdentification(deadline)
         logIdentification(identification)
         send(Iap2MessageIds.IDENTIFICATION_ACCEPTED)
         log("iap2 tx=0x1d02 identification-accepted")
@@ -627,7 +633,54 @@ class Iap2SenderSession(
         deadline: Long,
     ): Iap2Csm.Frame =
         expectOrNull(messageId, deadline)
-            ?: throw IOException("等待 0x${messageId.toString(16)} 超时")
+            ?: throw IOException(timeoutMessage(messageId))
+
+    /**
+     * 「等不到消息」的两种成因必须分开报，否则日志会误导排查：
+     *  - 链路已死（对端拆 socket / 本地取消）：[expectOrNull] 在 `!channel.isAlive`
+     *    时返回 null，此时并不是等满窗口，而是链路被拆了；
+     *  - 真超时：链路还在，只是对端一直不回。
+     * 2026-10-25 的失败轮里，绝大多数「等待 0x1d01 超时」实际是前者（用户取消或
+     * 车机主动 close），被当成协议超时排查了好几轮。
+     */
+    private fun timeoutMessage(messageId: Int): String {
+        val id = "0x${messageId.toString(16).padStart(4, '0')}"
+        return if (channel.isAlive) {
+            "等待 $id 超时（链路仍在线，对端未应答）"
+        } else {
+            "等不到 $id：链路已被对端断开或本地关闭"
+        }
+    }
+
+    /**
+     * 等车机身份（0x1D01），并在等待期间容忍**链路重新协商**。
+     *
+     * 车机重发 SYN（链路层不接受首帧 SYN|ACK）时，它会重建同步边界；
+     * 边界**之前**发出的 0x1D00 因此被它的会话层丢弃——即使传输层已经 ACK
+     * （2026-10-25 实测：车机 ACK 了 seq=101 的 0x1D00，却始终不回 0x1D01，
+     * 随后彻底静默）。所以每次发现新的 SYN|ACK 回显，就补发一遍识别请求，
+     * 最多 [MAX_IDENTIFICATION_RESENDS] 次。
+     */
+    private fun expectIdentification(deadline: Long): Iap2Csm.Frame {
+        var echoBaseline = channel.syncEchoCount
+        var resends = 0
+        while (true) {
+            val slice = minOf(deadline, System.nanoTime() + RESYNC_POLL_NANOS)
+            val frame = expectOrNull(Iap2MessageIds.IDENTIFICATION_INFORMATION, slice)
+            if (frame != null) return frame
+            if (!channel.isAlive) throw IOException(timeoutMessage(Iap2MessageIds.IDENTIFICATION_INFORMATION))
+            if (System.nanoTime() >= deadline) {
+                throw IOException(timeoutMessage(Iap2MessageIds.IDENTIFICATION_INFORMATION))
+            }
+            val echoes = channel.syncEchoCount
+            if (echoes != echoBaseline && resends < MAX_IDENTIFICATION_RESENDS) {
+                echoBaseline = echoes
+                resends++
+                log("iap2 车机重新同步（累计回显 $echoes 次）——补发 0x1d00（第 $resends 次）")
+                send(Iap2MessageIds.START_IDENTIFICATION)
+            }
+        }
+    }
 
     /**
      * 同 [expect]，但超时返回 null（用于可选消息）。非预期帧进暂存区供后续消费。

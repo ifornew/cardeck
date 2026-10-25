@@ -2,6 +2,6 @@
 <!-- 设置页菜单项左侧图标片：蓝色圆角 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
-    <solid android:color="#FF0A84FF" />
+    <solid android:color="@color/car_menu_chip_bg" />
     <corners android:radius="7dp" />
 </shape>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- CarPlay 状态栏信号格：圆头小竖条（原生是圆角矩形，不是平顶方块）。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="0.38dp" />
+    <solid android:color="@color/car_text_strong" />
+</shape>

@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 桌面单个应用格子：图标 + 白色标签（对照 CarPlay 主屏样式） -->
+<!-- 桌面单个应用格子：图标 + 标签（对照原生 CarPlay 主屏）——
+     原生 CarPlay 的图标文字是**纯文字**（无胶囊底），靠阴影在壁纸上可读：
+     白天深色字 + 黑阴影，夜间白字 + 黑阴影（颜色见 values / values-night 的 car_text_strong）。 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -21,15 +23,15 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="6dp"
-        android:background="@drawable/bg_app_label"
+        android:ellipsize="end"
         android:gravity="center"
         android:maxLines="1"
-        android:ellipsize="end"
-        android:paddingLeft="6dp"
-        android:paddingRight="6dp"
-        android:paddingTop="1dp"
-        android:paddingBottom="1dp"
-        android:textColor="#111111"
-        android:textSize="12sp"
-        android:textStyle="bold" />
+        android:paddingLeft="4dp"
+        android:paddingRight="4dp"
+        android:shadowColor="#B3000000"
+        android:shadowDx="0"
+        android:shadowDy="1"
+        android:shadowRadius="3"
+        android:textColor="@color/car_text_strong"
+        android:textSize="12sp" />
 </LinearLayout>

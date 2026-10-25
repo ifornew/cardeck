@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.util.Log
 import io.github.shaonialife.cardeck.launcher.VirtualLauncher
+import io.github.shaonialife.cardeck.launcher.settings.ThemePrefs
 import io.github.shaonialife.cardeck.util.DebugFileLog
 
 /**
@@ -22,6 +23,20 @@ class SenderApp : Application() {
         // 之后的部分。必须在这里写（Application 是进程最早入口），晚于任何业务日志
         // 都会让它被算进「历史」。
         DebugFileLog.markSessionStart(this)
+        // 外观主题（白天/黑夜/自动）：必须在任何 Activity 创建前落到 AppCompat，
+        // 否则车机会先用跟随系统的默认值闪一次再被重建。
+        ThemePrefs.apply(this)
+        // 「自动」档跟随手机系统深浅色：系统配置变化时重新对账（车机虚拟屏的
+        // Activity 不会收到该变化，需主动通知重建）。
+        registerComponentCallbacks(
+            object : android.content.ComponentCallbacks {
+                override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+                    ThemePrefs.refreshFromSystem(this@SenderApp)
+                }
+
+                override fun onLowMemory() = Unit
+            },
+        )
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             Log.e(TAG, "未捕获异常（线程 ${thread.name}，已吞掉保进程）", throwable)

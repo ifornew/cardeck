@@ -13,7 +13,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="end"
-        android:textColor="#FF8E8E93"
+        android:textColor="@color/car_text_tertiary"
         android:textSize="12sp" />
 
     <FrameLayout
@@ -29,7 +29,7 @@
             android:layout_marginTop="18dp"
             android:gravity="center"
             android:text="正在读取应用列表…"
-            android:textColor="#7C8B8B"
+            android:textColor="@color/car_text_tertiary"
             android:textSize="12.5sp" />
 
         <androidx.recyclerview.widget.RecyclerView

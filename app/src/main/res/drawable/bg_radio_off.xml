@@ -5,5 +5,5 @@
     <solid android:color="@android:color/transparent" />
     <stroke
         android:width="2dp"
-        android:color="#FF48484A" />
+        android:color="@color/car_divider_dim" />
 </shape>

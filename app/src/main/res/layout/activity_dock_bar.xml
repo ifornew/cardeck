@@ -8,7 +8,7 @@
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#FF000000">
+    android:background="@color/car_window_bg">
 
     <ImageView
         android:id="@+id/dockWallpaper"
@@ -20,27 +20,29 @@
     <View
         android:id="@+id/dockScrim"
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        android:layout_height="match_parent"
+        android:layout_margin="1.90dp" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:paddingLeft="2.29dp"
-        android:paddingRight="3.81dp"
+        android:paddingLeft="1.90dp"
+        android:paddingRight="3.05dp"
         android:paddingTop="1.52dp"
         android:paddingBottom="1.52dp">
 
         <ImageView
             android:id="@+id/dockHome"
-            android:layout_width="38.10dp"
+            android:layout_width="36dp"
             android:layout_height="match_parent"
             android:background="?android:attr/selectableItemBackgroundBorderless"
             android:contentDescription="回到桌面"
-            android:padding="9.90dp"
+            android:padding="7dp"
             android:scaleType="fitCenter"
-            android:src="@drawable/ic_dock_home" />
+            android:src="@drawable/ic_dock_home"
+            android:tint="@color/car_icon" />
 
         <View
             android:layout_width="0.38dp"
@@ -48,7 +50,7 @@
             android:layout_marginLeft="2.29dp"
             android:layout_marginTop="2.29dp"
             android:layout_marginBottom="2.29dp"
-            android:background="#3A3A3C" />
+            android:background="@color/car_divider_dim" />
 
         <HorizontalScrollView
             android:layout_width="0dp"
@@ -78,15 +80,67 @@
                 android:layout_height="wrap_content"
                 android:singleLine="true"
                 android:letterSpacing="0.03"
-                android:textColor="#FFFFFF"
+                android:textColor="@color/car_text_strong"
                 android:textStyle="bold" />
 
-            <TextView
-                android:id="@+id/dockBatteryText"
+            <!-- CarPlay 状态行：信号格 + 电池图标 + 百分比 -->
+            <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="1.14dp"
-                android:textColor="#B0B0B8" />
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <LinearLayout
+                    android:id="@+id/dockSignal"
+                    android:layout_width="wrap_content"
+                    android:layout_height="5.33dp"
+                    android:gravity="bottom"
+                    android:orientation="horizontal">
+
+                    <View
+                        android:layout_width="0.76dp"
+                        android:layout_height="2.29dp"
+                        android:layout_marginEnd="0.57dp"
+                        android:background="@drawable/bg_signal_bar" />
+
+                    <View
+                        android:layout_width="0.76dp"
+                        android:layout_height="3.05dp"
+                        android:layout_marginEnd="0.57dp"
+                        android:background="@drawable/bg_signal_bar" />
+
+                    <View
+                        android:layout_width="0.76dp"
+                        android:layout_height="4.19dp"
+                        android:layout_marginEnd="0.57dp"
+                        android:background="@drawable/bg_signal_bar" />
+
+                    <View
+                        android:layout_width="0.76dp"
+                        android:layout_height="5.33dp"
+                        android:background="@drawable/bg_signal_bar" />
+                </LinearLayout>
+
+                <!-- Wi-Fi（连着车机热点时显示，对应原生 CarPlay 状态栏的 Wi-Fi 图标） -->
+                <ImageView
+                    android:id="@+id/dockWifi"
+                    android:layout_width="3.81dp"
+                    android:layout_height="2.86dp"
+                    android:layout_marginStart="2.29dp"
+                    android:importantForAccessibility="no"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/ic_wifi"
+                    android:tint="@color/car_text_strong"
+                    android:visibility="gone" />
+
+                <!-- 电池：自绘字形（描边/填充/正极/充电闪电，见 BatteryGlyphView） -->
+                <io.github.shaonialife.cardeck.launcher.BatteryGlyphView
+                    android:id="@+id/dockBattery"
+                    android:layout_width="9.14dp"
+                    android:layout_height="4.57dp"
+                    android:layout_marginStart="2.29dp" />
+            </LinearLayout>
         </LinearLayout>
     </LinearLayout>
 </FrameLayout>

@@ -257,6 +257,9 @@ class DualDisplayComposer(
         mapInput?.surfaceTexture?.setDefaultBufferSize(width, height)
     }
 
+    /** 地图屏累计帧数（0=地图屏未创建）。空闲保活据此判断地图是否长时间没有重绘。 */
+    fun mapFrameCount(): Int = mapInput?.frameCount ?: 0
+
     fun stop() {
         if (!running.getAndSet(false)) return
         glThread?.interrupt()

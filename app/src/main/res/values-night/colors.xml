@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 车机 UI 主题令牌：夜间（= 本次改动前的深色视觉，逐值保持不变）。
+         白天版本见 values/colors.xml。 -->
+    <color name="car_window_bg">#FF000000</color>
+    <color name="car_text_primary">#FFF5F5F7</color>
+    <color name="car_text_secondary">#FFE0E0E5</color>
+    <color name="car_text_tertiary">#FF8E8E93</color>
+    <color name="car_text_strong">#FFFFFFFF</color>
+    <color name="car_text_muted">#FFB0B0B8</color>
+    <color name="car_accent">#FF0A84FF</color>
+    <color name="car_divider">#FF1E1E21</color>
+    <color name="car_divider_dim">#FF3A3A3C</color>
+    <color name="car_surface_sunken">#FF1F1F23</color>
+    <color name="car_menu_item_bg">#FF1C1C1F</color>
+    <color name="car_menu_chip_bg">#FF0A84FF</color>
+    <color name="car_toast_bg">#F01C1C1F</color>
+    <color name="car_toast_text">#FFE5E5EA</color>
+    <color name="car_nav_card_bg">#B323282E</color>
+    <color name="car_media_track">#33FFFFFF</color>
+    <color name="car_media_progress">#FFF5F5F7</color>
+    <color name="car_icon">#FFFFFFFF</color>
+    <color name="car_page_dot">#66FFFFFF</color>
+    <color name="car_page_dot_sel">#FFFFFFFF</color>
+    <color name="car_focus_fill">#22FFFFFF</color>
+    <color name="car_focus_stroke">#AAFFFFFF</color>
+    <color name="car_scrim">#FF000000</color>
+    <color name="car_on_accent">#FFFFFFFF</color>
+    <!-- 分段控件夜间：近黑轨道 + 中灰选中片 + 白字（对照 iOS 深色分段） -->
+    <color name="car_segment_track">#FF1C1C1E</color>
+    <color name="car_segment_sel">#FF636366</color>
+    <color name="car_segment_sel_text">#FFFFFFFF</color>
+    <color name="car_card_bg">#FF1C1C1E</color>
+</resources>

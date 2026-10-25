@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 设置菜单「外观主题」图标：圆环 + 半侧阴阳（昼夜）。菜单图标片是蓝色底，统一白色。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="13dp"
+    android:height="13dp"
+    android:viewportWidth="64"
+    android:viewportHeight="64">
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M32,6 a26,26 0 1 0 0,52 a26,26 0 1 0 0,-52 z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="5.5" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M32,12 a20,20 0 0 1 0,40 z" />
+</vector>

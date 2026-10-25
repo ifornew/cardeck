@@ -1302,6 +1302,7 @@ class MainActivity : AppCompatActivity() {
      * 选择立即生效（链路动态读取目标，无需重连）。
      */
     private fun showTargetPicker() {
+        log("TARGET: 打开选择目标车机弹窗")
         val adapter =
             try {
                 (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
@@ -1322,8 +1323,12 @@ class MainActivity : AppCompatActivity() {
         targetPicker = dialog
         scannedTargets.clear()
         pendingBondAddress = null
-        view.findViewById<TextView>(R.id.btnCancelPicker).setOnClickListener { dialog.dismiss() }
-        view.findViewById<TextView>(R.id.btnRescan).setOnClickListener { startTargetScan(dialog) }
+        view.findViewById<TextView>(R.id.btnCancelPicker).setOnClickListener {
+            dialog.dismiss()
+        }
+        view.findViewById<TextView>(R.id.btnRescan).setOnClickListener {
+            startTargetScan(dialog)
+        }
         renderBondedGroup(view)
         dialog.setOnDismissListener {
             stopTargetScan()
@@ -1338,7 +1343,9 @@ class MainActivity : AppCompatActivity() {
             dialog.window?.setLayout(width, android.view.ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         dialog.show()
-        startTargetScan(dialog)
+        // 扫描失败（权限/适配器异常）单独兜住并留日志
+        runCatching { startTargetScan(dialog) }
+            .onFailure { log("TARGET: 扫描启动失败 ${it.javaClass.simpleName}: ${it.message}") }
     }
 
     /** 渲染「已配对」组：自动行 + 每个已配对设备。 */
@@ -1422,7 +1429,9 @@ class MainActivity : AppCompatActivity() {
             setPadding(paddingLeft, paddingTop, paddingRight, paddingBottom)
         }
         row.findViewById<ImageView>(R.id.devIcon).setColorFilter(getColor(iconTint))
-        row.setOnClickListener { onClick() }
+        row.setOnClickListener {
+            onClick()
+        }
         return row
     }
 
@@ -2443,6 +2452,7 @@ class MainActivity : AppCompatActivity() {
         if (SessionController.logListener === logListener) SessionController.logListener = null
         if (SessionController.uiHintSink === uiHintSinkRef) SessionController.uiHintSink = null
         SessionController.dialogSink = null
+
         if (SessionController.ssidSink === ssidSink) SessionController.ssidSink = null
     }
 }

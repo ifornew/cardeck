@@ -38,13 +38,18 @@ import io.github.shaonialife.cardeck.util.Bg
 object VirtualLauncher {
     private const val TAG = "VirtualLauncher"
 
+    /** 主线程 Handler（空闲保活的恢复尺寸延时投递用）。 */
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
     /**
      * dock 宽度（dp；应用屏可用宽度 = 总宽 - 本值换算的像素）。CarPlay 化后含时钟/电量。
      * 密度基准 420dpi（↔ 奥迪设计画布 1160×540），由 SessionController 按画布短边
-     * 等比下发——高分辨率车机下 dock 条与文字/图标同步放大，占画布短边恒定 23.3%
-     * （= 设计 126/540；2026-10-17 修复「高分辨率下 dock 显小」）。
+     * 等比下发——高分辨率车机下 dock 条与文字/图标同步放大，占画布短边恒定 20.4%
+     * （= 设计 110/540；2026-10-17 修复「高分辨率下 dock 显小」，2026-10-25 用户
+     * 要求 dock 再窄一点：48dp→42dp）。dock 内图标/首页按钮尺寸见 DockActivity 与
+     * activity_dock_sidebar/bar.xml，须同步收小，否则窄条下会被裁。
      */
-    const val DOCK_WIDTH_DP = 48
+    const val DOCK_WIDTH_DP = 42
 
     /**
      * 竖屏锁定应用的 letterbox 宽高比（宽/高，会话建立时经 Shizuku 写入系统）。
@@ -359,7 +364,7 @@ object VirtualLauncher {
         // 新会话：「本次会话不再提示」等用户级决定作废
         LetterboxHintController.resetSession()
         val density = densityDpi / 160f
-        // dock 条物理宽度 = 48dp × 密度（密度随画布短边等比，见 DOCK_WIDTH_DP 注释）
+        // dock 条物理宽度 = 42dp × 密度（密度随画布短边等比，见 DOCK_WIDTH_DP 注释）
         val thicknessPx = (DOCK_WIDTH_DP * density).toInt().coerceAtLeast(80)
         // 车机方向决定 dock 位置：横屏 → 左侧竖条；竖屏 → 底部横条（2026-10-11 用户要求）
         dockAtBottom = totalHeight > totalWidth
@@ -838,6 +843,37 @@ object VirtualLauncher {
         return ok
     }
 
+    /**
+     * dock 图标长按关闭应用。
+     *
+     * 用 `am stack remove <taskId>` 销毁该包在车机虚拟屏上的任务（**不杀进程**——同一应用
+     * 可能还在手机侧使用），并把它移出 dock 运行列表；若关闭的是当前前台应用则回桌面，
+     * 否则应用屏会停在黑屏上。
+     *
+     * 只清理车机侧三块屏的任务，手机屏（display 0）的任务保持不动。
+     */
+    fun closeApp(component: ComponentName): Boolean {
+        val vmDisplays = listOf(appDisplayId, appHiDisplayId, mapDisplayId).filter { it >= 0 }.toSet()
+        var closed = false
+        taskIdsByDisplayPkg().forEach { (displayId, byPkg) ->
+            if (displayId !in vmDisplays) return@forEach
+            byPkg[component.packageName]?.forEach { taskId ->
+                Shell.exec("am stack remove $taskId", timeoutMs = 4000)
+                closed = true
+                Log.i(TAG, "CLOSE: ${component.packageName} task=$taskId display=$displayId")
+            }
+        }
+        synchronized(runningApps) { runningApps.remove(component) }
+        notifyRunningAppsChanged()
+        logSink?.invoke("CLOSE: 长按关闭 ${component.packageName}（清任务=$closed）")
+        if (closed) {
+            // 全屏地图被关掉后地图屏会空白：先退出全屏再回桌面
+            if (mapFullscreen) setMapFullscreen(false)
+            goGrid()
+        }
+        return closed
+    }
+
     // ---- 仪表盘（分屏）与 home 键模式循环 ----
     //
     // home 键语义（用户定义）：应用 → 仪表盘；桌面 → 仪表盘；仪表盘 → 桌面。
@@ -950,6 +986,50 @@ object VirtualLauncher {
         } else {
             LetterboxHintController.clear()
         }
+    }
+
+    /**
+     * 地图屏累计帧数（0=地图屏未创建）。地图卡长时间无新帧时，虚拟屏的内容会被系统
+     * 回收、卡片渲染成黑块（触摸才恢复）——据此触发 [nudgeMapDisplay] 保活。
+     */
+    fun mapFrameCount(): Int = composer?.mapFrameCount() ?: 0
+
+    /**
+     * 地图屏空闲保活：1px 尺寸往返，逼地图应用重新布局/重绘（2026-10-25 用户反馈
+     * 「地图卡不触摸一段时间就变黑，用手触碰能恢复」）。
+     *
+     * 只改 VirtualDisplay 的尺寸、**不更新** composer 的 buffer 尺寸与 mapDisplayW/H
+     * 记账：1px 差异在 UV 0..1 整幅映射下不可见，省掉一次 SurfaceTexture 重分配；
+     * mapDisplayW/H 保持原值，后续 resizeMapDisplay 的幂等判断不受影响。
+     * 仅在 300ms 后恢复原尺寸，地图应用会收到一次配置变更（保留地图状态）。
+     */
+    fun nudgeMapDisplay() {
+        val id = mapDisplayId
+        val w = mapDisplayW
+        val h = mapDisplayH
+        if (id < 0 || w <= 2 || h <= 0) return
+        val display = mapDisplay
+        val shrink = w - 1
+        runCatching {
+            if (displaysViaService) {
+                CarInputClient.service?.resizeDisplay(id, shrink, h, MAP_DISPLAY_DPI)
+            } else {
+                display?.resize(shrink, h, MAP_DISPLAY_DPI)
+            }
+        }
+        mainHandler.postDelayed(
+            {
+                runCatching {
+                    if (displaysViaService) {
+                        CarInputClient.service?.resizeDisplay(id, w, h, MAP_DISPLAY_DPI)
+                    } else {
+                        display?.resize(w, h, MAP_DISPLAY_DPI)
+                    }
+                }
+                logSink?.invoke("LAUNCHER: 地图屏空闲保活 ${w}x$h 往返（frames=${mapFrameCount()}）")
+            },
+            300L,
+        )
     }
 
     /**

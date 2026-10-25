@@ -93,6 +93,12 @@ class Iap2LinkChannel(
     /** 对端协商的最大控制载荷（已扣除帧头与校验和），协商前为 null。 */
     fun peerMaxControlPayload(): Int? = synchronized(lock) { engine.peerSynchronization?.maxLength?.minus(Iap2LinkEngine.HEADER_BYTES + 1) }
 
+    /**
+     * 已回显 SYN|ACK 的次数（含重放）。会话层在等上层消息时用它判断
+     * 「对端是否在等待期间重新协商了链路」——同步边界前发出的消息会被对端丢弃。
+     */
+    val syncEchoCount: Int get() = engine.synchronizationEchoCount
+
     /** 排入一个完整控制载荷；链路已死返回 false。窗口满时内部积压，由 ACK 驱动发出。 */
     fun sendControl(
         bytes: ByteArray,

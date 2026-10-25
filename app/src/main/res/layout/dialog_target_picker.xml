@@ -133,6 +133,17 @@
         </LinearLayout>
     </ScrollView>
 
+    <!-- 3 秒自动选择的倒计时提示（无已配对设备时隐藏） -->
+    <TextView
+        android:id="@+id/autoPickHint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="center"
+        android:textColor="@color/m3_primary"
+        android:textSize="11.5sp"
+        android:visibility="gone" />
+
     <TextView
         android:id="@+id/btnCancelPicker"
         android:layout_width="match_parent"

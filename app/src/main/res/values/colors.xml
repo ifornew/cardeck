@@ -33,4 +33,47 @@
     <color name="m3_console_bg">#0A0F10</color>
     <color name="m3_mono_dim">#9FB2B0</color>
     <color name="m3_mono_key">#6FC4CF</color>
+
+    <!-- ============ 车机 UI 主题令牌（本文件 = 白天/浅色；夜间见 values-night） ============
+         车机侧布局与 drawable 一律引用这些令牌，不再写死颜色。手机端 UI 仍用上面的
+         m3 深色令牌（手机界面固定深色，不随车机昼夜主题切换）。 -->
+    <color name="car_window_bg">#FFF2F2F7</color>
+    <color name="car_text_primary">#FF1C1C1E</color>
+    <color name="car_text_secondary">#FF3C3C43</color>
+    <color name="car_text_tertiary">#FF6C6C70</color>
+    <color name="car_text_strong">#FF000000</color>
+    <!-- dock 电量数字（叠在浅色壁纸+白暗幕上）：白天用接近正文的深灰，
+         原来的 #6C6C70 在浅底上“看不清”（2026-10-25 实车反馈） -->
+    <color name="car_text_muted">#FF3C3C43</color>
+    <color name="car_accent">#FF0A84FF</color>
+    <color name="car_divider">#FFD1D1D6</color>
+    <color name="car_divider_dim">#FFC7C7CC</color>
+    <color name="car_surface_sunken">#FFE5E5EA</color>
+    <color name="car_menu_item_bg">#FFE2E2E7</color>
+    <color name="car_menu_chip_bg">#FF0A84FF</color>
+    <color name="car_toast_bg">#F0FFFFFF</color>
+    <color name="car_toast_text">#FF1C1C1E</color>
+    <color name="car_nav_card_bg">#CCFFFFFF</color>
+    <color name="car_media_track">#33000000</color>
+    <color name="car_media_progress">#FF1C1C1E</color>
+    <!-- 单色图标（dock/媒体/导航/返回）：白天深色、夜间白色，见 values-night -->
+    <color name="car_icon">#FF1C1C1E</color>
+    <!-- 翻页圆点 / 旋钮选中框：压在全流壁纸上，随昼夜反转。
+         白天壁纸是浅米/浅蓝，圆点太透会“看不见”（2026-10-25 实车两次反馈）：
+         未选中提到 80% 黑，选中纯黑，保证浅底/杂色底上都清晰。 -->
+    <color name="car_page_dot">#CC000000</color>
+    <color name="car_page_dot_sel">#FF000000</color>
+    <color name="car_focus_fill">#22000000</color>
+    <color name="car_focus_stroke">#AA1C1C1E</color>
+    <!-- 暗幕/模糊底色的基色：白天压白（保住浅色观感与深色文字对比），夜间压黑 -->
+    <color name="car_scrim">#FFFFFFFF</color>
+    <!-- 蓝底分段控件选中片的文字：昼夜都必须是白色 -->
+    <color name="car_on_accent">#FFFFFFFF</color>
+    <!-- 分段控件（iOS/CarPlay 风格）：浅灰轨道 + 白色选中片 + 黑字；
+         夜间轨道近黑、选中片中灰 + 白字（不是蓝底白字） -->
+    <color name="car_segment_track">#FFE9E9EB</color>
+    <color name="car_segment_sel">#FFFFFFFF</color>
+    <color name="car_segment_sel_text">#FF000000</color>
+    <!-- 设置页内容卡（iOS/CarPlay 分组卡片）：白天纯白卡、夜间深灰卡 -->
+    <color name="car_card_bg">#FFFFFFFF</color>
 </resources>

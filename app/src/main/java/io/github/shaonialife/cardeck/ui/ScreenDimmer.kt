@@ -3,10 +3,12 @@ package io.github.shaonialife.cardeck.ui
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
+import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -93,7 +95,7 @@ object ScreenDimmer {
             return
         }
         appContext = context.applicationContext
-        windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        windowManager = defaultDisplayWindowManager(context)
         handler = Handler(Looper.getMainLooper())
         // 常亮只在会话期间打开：应用启动时 attach 不把屏幕超时改成「永不」，
         // 否则未连接时手机也永不熄屏（车机断开后同样收不回来）。
@@ -167,7 +169,7 @@ object ScreenDimmer {
         if (windowManager == null) {
             val ctx = appContext ?: return
             if (!android.provider.Settings.canDrawOverlays(ctx)) return
-            windowManager = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            windowManager = defaultDisplayWindowManager(ctx)
             h.post { addWatcher() }
         }
         // 手动假息屏要有意义，屏幕必须保持常亮（否则真睡下去就没法「点击恢复」）
@@ -223,6 +225,15 @@ object ScreenDimmer {
                 dimView = view
                 dimShown = true
                 Log.i("CarPlaySender", "DIMMER: 暗幕已显示")
+                // 兜底：万一系统仍把暗幕投到虚拟屏（车机应用区），立刻撤掉——
+                // 宁可手机不暗，也不能整块盖黑车机画面（2026-10-26 实车黑屏根因）。
+                view.post {
+                    val id = view.display?.displayId ?: Display.DEFAULT_DISPLAY
+                    if (id != Display.DEFAULT_DISPLAY) {
+                        Log.w(TAG, "暗幕被投到非默认屏 display=$id，已撤下")
+                        hideDim()
+                    }
+                }
             }.onFailure { Log.w(TAG, "暗幕添加失败：${it.message}") }
     }
 
@@ -231,6 +242,24 @@ object ScreenDimmer {
         dimView = null
         dimShown = false
         runCatching { windowManager?.removeView(view) }
+    }
+
+    /**
+     * 只作用于手机默认屏（display 0）的 WindowManager。
+     *
+     * 直接用传入 context 的 `getSystemService(WINDOW_SERVICE)` 在本机（鸿蒙）实测会
+     * 漂到 CarPlay 虚拟屏上：45s 无操作后弹出的全屏黑幕盖在应用屏
+     * （GridActivity，displayId 2748）之上，桌面/卡片/页点整体变黑，触摸一下
+     * （暗幕 onClick 撤下）才恢复——用户反馈的「黑屏」即此（2026-10-26 实车验证：
+     * dumpsys window 里本包的 fillxfill APPLICATION_OVERLAY 窗口 mDisplayId=2748）。
+     * 暗幕/触摸探针的语义本来只针对手机屏，故显式取默认屏的 DisplayContext。
+     */
+    private fun defaultDisplayWindowManager(context: Context): WindowManager? {
+        val dm = context.getSystemService(DisplayManager::class.java) ?: return null
+        val display = dm.getDisplay(Display.DEFAULT_DISPLAY) ?: return null
+        return context
+            .createDisplayContext(display)
+            .getSystemService(Context.WINDOW_SERVICE) as? WindowManager
     }
 
     /** 1px 触摸探针：捕获屏幕上任意处的 DOWN 事件用于重置计时，不消费事件。 */

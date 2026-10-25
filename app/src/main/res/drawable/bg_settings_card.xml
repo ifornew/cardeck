@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 设置页右栏内容卡：iOS/CarPlay 分组卡片（白天白卡 / 夜间深灰卡） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/car_card_bg" />
+    <corners android:radius="14dp" />
+</shape>

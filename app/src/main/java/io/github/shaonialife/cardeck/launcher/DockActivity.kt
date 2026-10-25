@@ -15,6 +15,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import io.github.shaonialife.cardeck.R
+import io.github.shaonialife.cardeck.launcher.settings.ThemePrefs
 import io.github.shaonialife.cardeck.ui.WallpaperStore
 import io.github.shaonialife.cardeck.util.Bg
 
@@ -29,9 +30,9 @@ import io.github.shaonialife.cardeck.util.Bg
 class DockActivity : AppCompatActivity() {
     private var appsContainer: LinearLayout? = null
     private var clockView: TextView? = null
-    private var batteryText: TextView? = null
-    private var batteryBar: View? = null
-    private var batteryFill: View? = null
+    private var batteryView: BatteryGlyphView? = null
+    private var signalView: LinearLayout? = null
+    private var wifiView: ImageView? = null
     private var barForm = false
 
     /**
@@ -50,6 +51,7 @@ class DockActivity : AppCompatActivity() {
         object : Runnable {
             override fun run() {
                 refresh()
+                updateSignal()
                 pollHandler.postDelayed(this, 3_000)
             }
         }
@@ -78,6 +80,36 @@ class DockActivity : AppCompatActivity() {
     /** dock 外观偏好监听（设置页拖动滑条即时生效）。 */
     private val dockPrefsListener: () -> Unit = { runOnUiThread { applyDockPrefs() } }
 
+    /** dock 主页按钮（布局 inflate 后赋值；模式监听用它换图标）。 */
+    private var dockHomeView: ImageView? = null
+
+    /**
+     * 「仪表盘 / 应用网格」切换时换 dock 主页按钮图标（原生 CarPlay 语义）：
+     *  - 仪表盘激活 → 3×3 小圆角方块（点按回应用网格）
+     *  - 应用网格/应用内 → 单个空心圆角方块（点按进仪表盘）
+     */
+    private val dockModeListener: (Boolean) -> Unit = { dashboard ->
+        runOnUiThread {
+            if (!isFinishing && !isDestroyed) {
+                dockHomeView?.setImageResource(
+                    if (dashboard) R.drawable.ic_dock_home else R.drawable.ic_dock_dashboard,
+                )
+            }
+        }
+    }
+
+    /** 「自动」档下手机系统深浅色变化：昼夜资源不一致时重建（虚拟屏不自动收到该变化）。 */
+    private val themeNightListener: (Boolean) -> Unit = { _ ->
+        runOnUiThread {
+            if (!isFinishing &&
+                !isDestroyed &&
+                ThemePrefs.isNight(this) != ThemePrefs.targetNight(this)
+            ) {
+                recreate()
+            }
+        }
+    }
+
     private val batteryReceiver =
         object : BroadcastReceiver() {
             override fun onReceive(
@@ -88,31 +120,28 @@ class DockActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ThemePrefs.applyToActivity(this)
+        ThemePrefs.addNightListener(themeNightListener)
         val dm = resources.displayMetrics
         barForm = dm.widthPixels > dm.heightPixels
         setContentView(if (barForm) R.layout.activity_dock_bar else R.layout.activity_dock_sidebar)
 
         clockView = findViewById(R.id.dockClock)
-        batteryText = findViewById(R.id.dockBatteryText)
-        batteryBar = findViewById(R.id.dockBatteryBar)
-        batteryFill = findViewById(R.id.dockBatteryFill)
+        batteryView = findViewById(R.id.dockBattery)
+        signalView = findViewById(R.id.dockSignal)
+        wifiView = findViewById(R.id.dockWifi)
         appsContainer = findViewById(R.id.dockApps)
         wallpaperView = findViewById(R.id.dockWallpaper)
         findViewById<ImageView>(R.id.dockHome).apply {
+            dockHomeView = this
             setOnClickListener { Bg.run("dock-home") { VirtualLauncher.onHomePressed() } }
-            // 图标随模式切换：仪表盘激活=房屋（点按回桌面）；否则=田字格（点按进仪表盘）。
-            // 应用中与桌面同为田字格——两种场景下的动作都是进仪表盘，语义一致。
-            VirtualLauncher.addDashboardListener { dashboard ->
-                runOnUiThread {
-                    setImageResource(
-                        if (dashboard) R.drawable.ic_dock_home else R.drawable.ic_dock_dashboard,
-                    )
-                }
-            }
+            // 图标随模式切换：仪表盘激活=3×3 网格（点按回应用网格）；
+            // 否则=单个空心圆角方块（点按进仪表盘）。与原生 CarPlay 左下角按钮一致。
             setImageResource(
                 if (VirtualLauncher.dashboardMode) R.drawable.ic_dock_home else R.drawable.ic_dock_dashboard,
             )
         }
+        VirtualLauncher.addDashboardListener(dockModeListener)
 
         VirtualLauncher.addRunningAppsListener(refreshListener)
         pollHandler.postDelayed(pollRunnable, 3_000)
@@ -120,7 +149,6 @@ class DockActivity : AppCompatActivity() {
         // 字号按「设计 px × designScale」设置（不进 XML：荣耀 ROM 上 autoSize 对窄 dock
         // 不生效，仍需布局完成后按实测宽度手工缩钟表——见 fitClockText；13/22 为原型值）
         clockView?.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 22f * designScale)
-        batteryText?.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 13f * designScale)
         clockView?.post { fitClockText(clockView!!) }
         setupWallpaper()
         // 注册变更通知 + 立即对账一次（兜底注册前发生的更换——事件不补发）
@@ -136,11 +164,13 @@ class DockActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         VirtualLauncher.removeRunningAppsListener(refreshListener)
+        VirtualLauncher.removeDashboardListener(dockModeListener)
         pollHandler.removeCallbacksAndMessages(null)
         clockHandler.removeCallbacks(clockTicker)
         WallpaperStore
             .removeListener(wallpaperListener)
         DockPrefs.removeListener(dockPrefsListener)
+        ThemePrefs.removeNightListener(themeNightListener)
         runCatching { unregisterReceiver(batteryReceiver) }
         super.onDestroy()
     }
@@ -148,6 +178,7 @@ class DockActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         refresh()
+        updateSignal()
     }
 
     /**
@@ -181,14 +212,30 @@ class DockActivity : AppCompatActivity() {
      * 应用 dock 外观偏好：暗幕强度（scrim View 的黑 alpha）+ 背景高斯模糊
      * （RenderEffect，API 31+；半径按 dock 物理像素，最大 40px——乘 designScale
      * 保证高分辨率车机上模糊观感与奥迪基准一致）。
+     *
+     * 2026-10-26 CarPlay 化：暗幕从通栏色块改为**内缩的圆角面板**（XML 里留了
+     * 1.9dp 外边距），四周露出壁纸，形成 CarPlay dock 的「磨砂玻璃条」观感。
      */
     private fun applyDockPrefs() {
         val scrim = findViewById<View>(R.id.dockScrim) ?: return
         val alpha = (DockPrefs.scrimOpacity(this) * 255 / 100).coerceIn(0, 255)
+        // 暗幕基色随主题：白天压白、夜间压黑（否则白底壁纸被黑幕压暗，深色文字看不清）
+        val base = androidx.core.content.ContextCompat.getColor(this, R.color.car_scrim)
+        val border = androidx.core.content.ContextCompat.getColor(this, R.color.car_divider)
         scrim.background =
-            android.graphics.drawable.ColorDrawable(
-                android.graphics.Color.argb(alpha, 0, 0, 0),
-            )
+            android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = 12f * designScale
+                setColor(
+                    android.graphics.Color.argb(
+                        alpha,
+                        android.graphics.Color.red(base),
+                        android.graphics.Color.green(base),
+                        android.graphics.Color.blue(base),
+                    ),
+                )
+                setStroke((1f * designScale).toInt().coerceAtLeast(1), border)
+            }
         val wallpaper = wallpaperView ?: return
         val percent = DockPrefs.blur(this)
         if (percent <= 0) {
@@ -247,6 +294,10 @@ class DockActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 电量/充电状态 → 原生 CarPlay 电池字形（见 [BatteryGlyphView]）：
+     * 原生状态栏不显示百分比；平时单色，充电 iOS 绿 + 电池内部闪电，≤20% iOS 红。
+     */
     private fun updateBattery(intent: Intent?) {
         val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
@@ -257,23 +308,38 @@ class DockActivity : AppCompatActivity() {
             status == BatteryManager.BATTERY_STATUS_CHARGING ||
                 status == BatteryManager.BATTERY_STATUS_FULL
         runOnUiThread {
-            batteryText?.text = (if (charging) "⚡" else "") + "$percent%"
-            val bar = batteryBar
-            val fill = batteryFill
-            if (bar != null && fill != null) {
-                bar.post {
-                    val width = bar.width
-                    if (width > 0) {
-                        fill.layoutParams =
-                            (fill.layoutParams as FrameLayout.LayoutParams).apply {
-                                this.width =
-                                    (width * percent / 100)
-                                        .coerceAtLeast((3 * resources.displayMetrics.density).toInt())
-                            }
-                    }
-                }
-                fill.setBackgroundColor(if (percent <= 20) 0xFFFF6B6B.toInt() else 0xFF34C759.toInt())
+            batteryView?.apply {
+                this.percent = percent
+                this.charging = charging
             }
+        }
+    }
+
+    /**
+     * dock 状态栏信号区（对照原生 CarPlay）：
+     *  - 4 格圆角信号条 = 蜂窝信号强度（读不到时全部保持暗淡，不伪造格数）；
+     *  - Wi-Fi 图标 = 已连上 Wi-Fi（车机热点）时显示，与信号条并存。
+     */
+    private fun updateSignal() {
+        val container = signalView
+        val wifiOn =
+            runCatching {
+                val wm = applicationContext.getSystemService(android.net.wifi.WifiManager::class.java)
+                val info = wm?.connectionInfo
+                info != null && info.networkId >= 0 && info.rssi in -100..-20
+            }.getOrDefault(false)
+        val level =
+            runCatching {
+                val tm = getSystemService(android.telephony.TelephonyManager::class.java)
+                (tm?.signalStrength?.level ?: 0) + 1
+            }.getOrDefault(0)
+        runOnUiThread {
+            container?.let {
+                for (i in 0 until it.childCount) {
+                    it.getChildAt(i).alpha = if (i < level) 1f else 0.25f
+                }
+            }
+            wifiView?.visibility = if (wifiOn) View.VISIBLE else View.GONE
         }
     }
 
@@ -289,11 +355,15 @@ class DockActivity : AppCompatActivity() {
         lastRendered = current
         container.removeAllViews()
         val density = resources.displayMetrics.density
-        val iconPx = ((if (barForm) 32 else 30) * density).toInt()
-        val pad = (6 * density).toInt()
+        // dock 内宽 ≈ 37dp（侧栏 42dp 减去左右 padding；底栏高 42dp 减去上下 padding）。
+        // 对照原生 CarPlay：图标约占 dock 宽度/高度的 70%，即 30dp 图标 + 2dp 边距 = 34dp
+        // （圆角面板内缩后留下的内容宽度，2026-10-26）；图标之间留 6dp 间距。
+        val iconPx = (30 * density).toInt()
+        val pad = (2 * density).toInt()
+        val gap = (6 * density).toInt()
         val apps = synchronized(VirtualLauncher.runningApps) { VirtualLauncher.runningApps.toList() }
         val iconCache = VirtualLauncher.iconCache
-        apps.forEach { component ->
+        apps.forEachIndexed { index, component ->
             val drawable = iconCache[component] ?: packageManager.defaultActivityIcon
             // 位图化渲染（与桌面网格同一路径）：直接 setImageDrawable 会让 ImageView
             // 长期持有共享 Drawable 实例，其 bounds 被网格重绑改写后渲染错位
@@ -307,8 +377,19 @@ class DockActivity : AppCompatActivity() {
                     setOnClickListener {
                         Bg.run("launch-app") { VirtualLauncher.launchApp(component) }
                     }
+                    // 长按关闭：清掉车机侧任务（不杀进程）并移出 dock 列表
+                    setOnLongClickListener {
+                        Bg.run("close-app") { VirtualLauncher.closeApp(component) }
+                        true
+                    }
                 },
-                LinearLayout.LayoutParams(iconPx + pad * 2, iconPx + pad * 2),
+                LinearLayout
+                    .LayoutParams(iconPx + pad * 2, iconPx + pad * 2)
+                    .apply {
+                        if (index > 0) {
+                            if (barForm) marginStart = gap else topMargin = gap
+                        }
+                    },
             )
         }
     }

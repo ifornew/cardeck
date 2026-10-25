@@ -214,6 +214,22 @@ object SessionController {
      */
     private var endpointBrowser: CarPlayServiceBrowser? = null
 
+    /**
+     * 用户当前是否「要连着」（启动连接置 true，取消/断开置 false）。
+     * 异常断链自动重挂只看它：否则用户按下断开后，推流线程晚到的 onEnded 会把链路又拉起来。
+     */
+    @Volatile
+    private var connectionWanted = false
+
+    /** 异常断链「完整收尾 → 静默 → 重新发布」的令牌：取消/新一轮连接时自增作废。 */
+    private val rearmLock = Any()
+    private var rearmToken = 0
+    private var rearmPending = false
+    private val rearmHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** 异常断链后静默多久再重新发布（模拟用户「取消 → 启动」之间的空档）。 */
+    private const val ABNORMAL_REARM_DELAY_MS = 3_000L
+
     @Volatile
     var videoSender: VideoSender? = null
 
@@ -226,6 +242,14 @@ object SessionController {
     /** 本会话目标帧率（合成节奏上限；「显示」设置运行中切换可实时生效）。 */
     @Volatile
     var activeTargetFps: Int = 30
+
+    /**
+     * 最近一次握手时车机通告的最高刷新率（/info displays[].maxFPS；0=尚未握手/未知）。
+     * 「显示」设置据它禁用高于车机能力的帧率档位——这类档位即使选了也会被夹紧，
+     * 只会白增编码开销与无效帧。
+     */
+    @Volatile
+    var carMaxFps: Int = 0
 
     @Volatile
     var audioSender: AudioSender? = null
@@ -418,6 +442,8 @@ object SessionController {
      * 幂等：已有会话时 BT 组件的 start() 自行短路，不会双开。
      */
     fun startConnection(context: Context) {
+        connectionWanted = true
+        cancelPendingRearm()
         connectCancelled = false
         phaseHint = "蓝牙就绪，等待车机回连…"
         when (
@@ -445,14 +471,10 @@ object SessionController {
         // `_carplay-ctrl._tcp`，之后每 1s force_announce，收到车机邀请才建 AirPlay）。
         // 我们此前要等 0x5703 才注册，导致「车机发现手机」这一步总落在热点绑定之后，
         // 每轮多花 1~3 秒；现在启动连接即发布，换网时 ensureForNetwork 会自动重注册。
-        ctrlAdvertiser?.resetInviteCount()
-        // 后台发布：start() 首次要向 Shizuku 解析真实蓝牙 MAC（shell），不能在主线程做
-        Bg.run("ctrl-publish") { ctrlAdvertiser?.start() }
         // 主路径（真车）：监听手机侧 iPhone UUID，等车机回连 …cafe（BMW 82772 实测形态）
         // 兜底路径：主动连车机（SDP …caff 配件服务，奥迪 MIB3 实测）——宽限超时才启用，
         // 故必须先开监听，保证车机回连时服务端已在等待。
-        bluetoothServer?.start()
-        bluetoothClient?.start()
+        armLinks()
         // 诊断（奥迪实测：手机与车机「蓝牙已连接」时车机不开放 CarPlay）：
         // 连之前把目标设备的蓝牙配置文件状态打出来，失败时一眼看出是不是这个原因。
         Bg.run("bt-profile-diag") {
@@ -467,6 +489,8 @@ object SessionController {
 
     /** 「断开连接」（可在任意 Activity 实例上调用——操作的是真管线对象）。 */
     fun disconnect(context: Context) {
+        connectionWanted = false
+        cancelPendingRearm()
         val hadProjection = CarPlayService.mediaProjection != null
         pendingEndpointUpdate = null
         retireSession()
@@ -491,6 +515,77 @@ object SessionController {
         } else {
             appendLog("已手动断开并停止保活服务（常亮已恢复）")
         }
+    }
+
+    /**
+     * 发布能力 + 开监听（启动连接与「异常断链后重新发布」共用）。
+     *
+     * 能力发布先于连接（catplay 的做法：`_carplay-ctrl._tcp` 常驻广播，收到车机邀请
+     * 才建 AirPlay）；真车回连是 ⌜车机主动连手机⌟，所以监听必须先于任何等待。
+     */
+    private fun armLinks() {
+        ctrlAdvertiser?.resetInviteCount()
+        // 后台发布：start() 首次要向 Shizuku 解析真实蓝牙 MAC（shell），不能在主线程做
+        Bg.run("ctrl-publish") { ctrlAdvertiser?.start() }
+        bluetoothServer?.start()
+        bluetoothClient?.start()
+    }
+
+    /**
+     * 异常断链（不是用户断开）后的**完整收尾 + 静默 + 重新发布**。
+     *
+     * 为什么需要：WiFi 被系统静默回收时车机收不到任何 teardown 通知，它侧 CarPlay
+     * 会话仍是「已连接」；随后车机回连蓝牙只做链路层重试，拒绝重做识别——0x1D01
+     * 永远不来，链路静默到对端拆 socket 或用户手动取消（2026-10-25 实车 5 轮全此）。
+     * 用户手动「取消 → 启动」能立刻恢复（干净收尾后 10–50s 内即识别成功），说明
+     * 需要的正是这次完整收尾。这里把它自动化：停 ctrl 广播、释放 WiFi、关 AirPlay、
+     * 停 BT 监听，静默 [ABNORMAL_REARM_DELAY_MS] 后再重新发布。
+     */
+    private fun scheduleAbnormalRearm(reason: String) {
+        if (connectCancelled || !connectionWanted) return
+        val token =
+            synchronized(rearmLock) {
+                if (rearmPending) return
+                rearmPending = true
+                rearmToken
+            }
+        appendLog(
+            "LINK: 异常断链（$reason）——完整收尾（停 ctrl 广播/释放 WiFi/BT 监听），" +
+                "${ABNORMAL_REARM_DELAY_MS / 1000}s 后重新发布",
+        )
+        phaseHint = "网络异常断开——正在重置链路…"
+        Bg.run("link-teardown") {
+            // retireSession 会把 AirPlay 控制通道正常关掉（车机据此判定会话结束）
+            retireSession()
+            detachActiveBtSessions()
+            bluetoothServer?.stop()
+            bluetoothClient?.stop()
+            ctrlAdvertiser?.stop()
+            endpointBrowser?.stop()
+            wifiConnector?.release()
+            boundCarSsid = null
+        }
+        rearmHandler.postDelayed({ rearmNow(token) }, ABNORMAL_REARM_DELAY_MS)
+    }
+
+    private fun rearmNow(token: Int) {
+        synchronized(rearmLock) {
+            if (token != rearmToken) return // 用户已断开 / 已开始新一轮连接
+            rearmPending = false
+        }
+        if (connectCancelled || !connectionWanted) return
+        appendLog("LINK: 重新发布能力（ctrl 广播 + BT 监听），等待车机回连")
+        phaseHint = "已重置，等待车机回连…"
+        armLinks()
+    }
+
+    /** 作废待执行的「异常断链重挂」（用户断开、取消或重新启动连接时）。 */
+    private fun cancelPendingRearm() {
+        synchronized(rearmLock) {
+            rearmToken++
+            rearmPending = false
+        }
+        rearmHandler.removeCallbacksAndMessages(null)
     }
 
     /** 会话结束/新周期开始前彻底退役上一代会话（旧管线泄漏会累积编码器/虚拟显示器，最终 dequeueBuffer -19）。 */
@@ -2134,6 +2229,7 @@ object SessionController {
                                     // 合成器仍按 120 出帧，车机刷新跟不上——白耗带宽与
                                     // 编码器算力，链路上大量无效帧。按接收端上限夹紧。
                                     val maxFps = setup.maxFps
+                                    carMaxFps = if (maxFps in 24..240) maxFps else 0
                                     val fps =
                                         if (maxFps in 24..240) prefFps.coerceAtMost(maxFps) else prefFps
                                     if (fps != prefFps) {
@@ -2191,9 +2287,11 @@ object SessionController {
                                                 }
                                                 // 音频拆链归因：起过音频却很快被拆 → 记下该档位
                                                 // 不兼容，下次连接自动换档（见 attributeAudioTeardown）。
-                                                attributeAudioTeardown(
-                                                    stoppedByPeer = videoSender?.stoppedByPeer == true,
-                                                )
+                                                val peerDrop = videoSender?.stoppedByPeer == true
+                                                attributeAudioTeardown(stoppedByPeer = peerDrop)
+                                                // 对端/网络打断：车机侧会话要看到一次「干净收尾」才会重新
+                                                // 认人（详见 scheduleAbnormalRearm）。用户主动断开不走这里。
+                                                if (peerDrop) scheduleAbnormalRearm("推流被对端/网络中止")
                                                 // 推流一结束就核验车机热点是否仍被系统承认：EMUI 会在
                                                 // 无互联网的应用专属网络上 ~70s 后静默切回仅扫描，
                                                 // onLost 不回调、boundNetwork 残留，下一轮车机回连时

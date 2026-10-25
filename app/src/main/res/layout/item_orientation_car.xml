@@ -33,7 +33,7 @@
             android:layout_height="wrap_content"
             android:ellipsize="end"
             android:maxLines="1"
-            android:textColor="#FFF5F5F7"
+            android:textColor="@color/car_text_primary"
             android:textSize="13sp" />
 
         <!-- 系统侧覆盖状态小字：默认隐藏；打开时显示、残留（勾选框关但系统开）时红色高亮 -->

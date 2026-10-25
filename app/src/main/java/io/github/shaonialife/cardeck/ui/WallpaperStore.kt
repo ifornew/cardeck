@@ -9,15 +9,36 @@ import java.io.File
 
 /**
  * 车机壁纸存储：当前壁纸 = 用户选择的图片（files/wallpaper.jpg）或内置默认
- * （assets/wallpaper_default.jpg，Apple CarPlay 官方深色壁纸压缩版）。
+ * （按昼夜分两张：白天 assets/wallpaper_default_day.jpg、夜间
+ * assets/wallpaper_default.jpg——夜间即原 CarPlay 官方深色壁纸压缩版）。
  *
  * 合成器以位图上传 GL 纹理；更换壁纸后经 [version] 递增通知重载。
  */
 object WallpaperStore {
-    /** 内置默认壁纸（assets 内文件名）。 */
+    /** 内置默认壁纸（夜间；assets 内文件名）。 */
     const val DEFAULT_ASSET = "wallpaper_default.jpg"
 
+    /** 内置默认壁纸（白天）。 */
+    const val DEFAULT_DAY_ASSET = "wallpaper_default_day.jpg"
+
     private const val USER_FILE = "wallpaper.jpg"
+
+    /**
+     * 主题昼夜（由 ThemePrefs 显式下发）：默认壁纸按昼夜两张，选哪张只看这个值。
+     *
+     * 不能按「调用方 Context 的 uiMode」判断：切主题时 AppCompat 会重建车机 Activity，
+     * 旧实例可能先收到壁纸重解码请求、用**旧**配置把反色壁纸塞进共享缓存，新实例随后
+     * 直接命中该缓存——表现成「选白天显示黑壁纸、选黑夜显示白壁纸」（2026-10-25 实车）。
+     */
+    @Volatile
+    private var nightMode: Boolean? = null
+
+    /** 下发当前主题昼夜；变化时壁纸版本自增（清缓存 + 通知桌面/dock 重解码）。 */
+    fun setNight(night: Boolean) {
+        if (nightMode == night) return
+        nightMode = night
+        markChanged()
+    }
 
     private val versionCounter =
         java.util.concurrent.atomic
@@ -80,15 +101,34 @@ object WallpaperStore {
     private fun decodeDefault(
         context: Context,
         maxSize: Int,
+    ): Bitmap? {
+        // 默认壁纸按昼夜分两张；优先用主题显式下发的值（与调用方 Context 无关，
+        // 避免旧 Activity 的过期配置污染共享缓存），未下发时才退回本 Context 的配置
+        val night =
+            nightMode ?: (
+                (context.resources.configuration.uiMode and
+                    android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+                    android.content.res.Configuration.UI_MODE_NIGHT_YES
+            )
+        val asset = if (night) DEFAULT_ASSET else DEFAULT_DAY_ASSET
+        // 白天壁纸资源缺失时回退夜间那张（避免壁纸空白）
+        return decodeAsset(context, asset, maxSize)
+            ?: decodeAsset(context, DEFAULT_ASSET, maxSize)
+    }
+
+    private fun decodeAsset(
+        context: Context,
+        asset: String,
+        maxSize: Int,
     ): Bitmap? =
         runCatching {
-            context.assets.open(DEFAULT_ASSET).use { input ->
+            context.assets.open(asset).use { input ->
                 val options =
                     BitmapFactory.Options().apply {
                         inJustDecodeBounds = true
                         BitmapFactory.decodeStream(input, null, this)
                     }
-                context.assets.open(DEFAULT_ASSET).use { stream ->
+                context.assets.open(asset).use { stream ->
                     options.inJustDecodeBounds = false
                     options.inSampleSize = sampleSize(options.outWidth, options.outHeight, maxSize)
                     BitmapFactory.decodeStream(stream, null, options)

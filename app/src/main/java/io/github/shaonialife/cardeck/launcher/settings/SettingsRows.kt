@@ -94,7 +94,12 @@ object SettingsRows {
                     TextView(fragment.requireContext()).apply {
                         text = letter
                         textSize = 9f
-                        setTextColor(0xFF8E8E93.toInt())
+                        setTextColor(
+                            androidx.core.content.ContextCompat.getColor(
+                                fragment.requireContext(),
+                                R.color.car_text_tertiary,
+                            ),
+                        )
                         setPadding(0, (1.5f * density).toInt(), 0, (1.5f * density).toInt())
                         setOnClickListener {
                             val target =

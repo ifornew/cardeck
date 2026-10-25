@@ -2,7 +2,12 @@
 <!-- 仪表盘模式（分屏）右侧面板：上=导航快捷入口卡（回家/回单位），下=音乐控制卡。
      音乐卡形态：四周边距 + 圆角（代码设置 outline 裁剪）+ 背景=该区域壁纸的
      模糊切片 + 暗幕（强度与 dock 一致，DockPrefs）。壁纸/暗幕视图由代码填充。
-     导航卡为独立小卡片，与音乐卡之间保留 12dp 间距；圆角由代码同半径裁剪。 -->
+     导航卡为独立小卡片，与音乐卡之间保留 10dp 间距；圆角由代码同半径裁剪。
+
+     尺寸自适应：本布局按「设计基准卡宽 260dp」排版（GridActivity.dashboardContext
+     按实际卡片像素换算 fit 密度）。窄屏上整体等比缩小，比固定 dp 更不容易溢出。
+     导航入口的文案一律单行（maxLines=1 + ellipsize），否则窄卡里「回单位」会换行
+     把卡片撑高、两个入口高低不齐（2026-10-25 用户反馈「显示会乱」）。 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -12,10 +17,10 @@
     <LinearLayout
         android:id="@+id/navCard"
         android:layout_width="match_parent"
-        android:layout_height="52dp"
+        android:layout_height="54dp"
         android:background="@drawable/bg_nav_card"
         android:orientation="horizontal"
-        android:padding="6dp">
+        android:padding="7dp">
 
         <LinearLayout
             android:id="@+id/navHome"
@@ -32,15 +37,18 @@
                 android:layout_width="20dp"
                 android:layout_height="20dp"
                 android:importantForAccessibility="no"
-                android:src="@drawable/ic_nav_home" />
+                android:src="@drawable/ic_nav_home"
+                android:tint="@color/car_icon" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
+                android:layout_marginStart="4dp"
+                android:ellipsize="end"
+                android:maxLines="1"
                 android:text="回家"
-                android:textColor="#FFF5F5F7"
-                android:textSize="14sp" />
+                android:textColor="@color/car_text_primary"
+                android:textSize="13sp" />
         </LinearLayout>
 
         <LinearLayout
@@ -58,22 +66,25 @@
                 android:layout_width="20dp"
                 android:layout_height="20dp"
                 android:importantForAccessibility="no"
-                android:src="@drawable/ic_nav_work" />
+                android:src="@drawable/ic_nav_work"
+                android:tint="@color/car_icon" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
+                android:layout_marginStart="4dp"
+                android:ellipsize="end"
+                android:maxLines="1"
                 android:text="回单位"
-                android:textColor="#FFF5F5F7"
-                android:textSize="14sp" />
-            </LinearLayout>
+                android:textColor="@color/car_text_primary"
+                android:textSize="13sp" />
+        </LinearLayout>
     </LinearLayout>
 
     <!-- 导航卡与音乐卡间距 -->
     <View
         android:layout_width="match_parent"
-        android:layout_height="12dp" />
+        android:layout_height="10dp" />
 
     <!-- 音乐卡容器（壁纸切片 + 暗幕 + 媒体内容；垂直方向布局紧凑） -->
     <FrameLayout
@@ -97,21 +108,16 @@
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:gravity="center_horizontal"
+            android:gravity="center"
             android:orientation="vertical"
-            android:paddingLeft="14dp"
-            android:paddingRight="14dp">
-
-            <View
-                android:layout_width="0dp"
-                android:layout_height="0dp"
-                android:layout_weight="0.35" />
+            android:paddingLeft="12dp"
+            android:paddingRight="12dp">
 
             <!-- 专辑封面（有封面时显示，圆角由代码裁剪） -->
             <ImageView
                 android:id="@+id/dashCover"
-                android:layout_width="100dp"
-                android:layout_height="100dp"
+                android:layout_width="88dp"
+                android:layout_height="88dp"
                 android:layout_marginBottom="10dp"
                 android:importantForAccessibility="no"
                 android:scaleType="centerCrop"
@@ -125,19 +131,19 @@
                 android:layout_height="wrap_content"
                 android:letterSpacing="0.1"
                 android:text="媒体"
-                android:textColor="#FFE0E0E5"
-                android:textSize="13sp" />
+                android:textColor="@color/car_text_secondary"
+                android:textSize="11sp" />
 
             <TextView
                 android:id="@+id/dashMediaTitle"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
+                android:layout_marginTop="8dp"
                 android:ellipsize="end"
                 android:gravity="center"
                 android:maxLines="1"
                 android:text="未在播放"
-                android:textColor="#FFF5F5F7"
+                android:textColor="@color/car_text_primary"
                 android:textSize="16sp"
                 android:textStyle="bold" />
 
@@ -145,13 +151,13 @@
                 android:id="@+id/dashMediaArtist"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="3dp"
+                android:layout_marginTop="2dp"
                 android:ellipsize="end"
                 android:gravity="center"
                 android:maxLines="1"
                 android:text="媒体信息未连接"
-                android:textColor="#FFE0E0E5"
-                android:textSize="12sp" />
+                android:textColor="@color/car_text_secondary"
+                android:textSize="11sp" />
 
             <LinearLayout
                 android:layout_width="wrap_content"
@@ -162,31 +168,34 @@
 
                 <ImageView
                     android:id="@+id/dashPrev"
-                    android:layout_width="46dp"
-                    android:layout_height="46dp"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:background="?android:attr/selectableItemBackgroundBorderless"
                     android:importantForAccessibility="no"
-                    android:padding="8dp"
-                    android:src="@drawable/ic_media_prev" />
+                    android:padding="7dp"
+                    android:src="@drawable/ic_media_prev"
+                    android:tint="@color/car_icon" />
 
                 <ImageView
                     android:id="@+id/dashPlayPause"
-                    android:layout_width="64dp"
-                    android:layout_height="64dp"
+                    android:layout_width="58dp"
+                    android:layout_height="58dp"
                     android:layout_marginLeft="16dp"
                     android:layout_marginRight="16dp"
                     android:importantForAccessibility="no"
-                    android:padding="8dp"
-                    android:src="@drawable/ic_media_play" />
+                    android:padding="7dp"
+                    android:src="@drawable/ic_media_play"
+                    android:tint="@color/car_icon" />
 
                 <ImageView
                     android:id="@+id/dashNext"
-                    android:layout_width="46dp"
-                    android:layout_height="46dp"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:background="?android:attr/selectableItemBackgroundBorderless"
                     android:importantForAccessibility="no"
-                    android:padding="8dp"
-                    android:src="@drawable/ic_media_next" />
+                    android:padding="7dp"
+                    android:src="@drawable/ic_media_next"
+                    android:tint="@color/car_icon" />
             </LinearLayout>
 
             <ProgressBar
@@ -194,7 +203,7 @@
                 style="?android:attr/progressBarStyleHorizontal"
                 android:layout_width="match_parent"
                 android:layout_height="4dp"
-                android:layout_marginTop="10dp"
+                android:layout_marginTop="8dp"
                 android:max="1000"
                 android:progressDrawable="@drawable/bg_media_progress"
                 android:visibility="gone" />
@@ -203,16 +212,11 @@
                 android:id="@+id/dashMediaTime"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
+                android:layout_marginTop="4dp"
                 android:fontFeatureSettings="tnum"
                 android:text="0:00 / 0:00"
-                android:textColor="#FFE0E0E5"
-                android:textSize="11.5sp" />
-
-            <View
-                android:layout_width="0dp"
-                android:layout_height="0dp"
-                android:layout_weight="1" />
+                android:textColor="@color/car_text_secondary"
+                android:textSize="11sp" />
         </LinearLayout>
     </FrameLayout>
 </LinearLayout>

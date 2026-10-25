@@ -19,6 +19,7 @@ import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
 import io.github.shaonialife.cardeck.R
 import io.github.shaonialife.cardeck.input.KnobNav
+import io.github.shaonialife.cardeck.launcher.settings.ThemePrefs
 import io.github.shaonialife.cardeck.media.MediaSessionsState
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
 import io.github.shaonialife.cardeck.render.SPLIT_MAP_WIDTH_RATIO
@@ -52,6 +53,9 @@ class GridActivity : AppCompatActivity() {
     private var cellWidthPx = 0
     private var cellHeightPx = 0
     private var iconSizePx = 0
+
+    /** 格子间距（px）：格子尺寸从可用宽高里扣除 gap，避免图标贴在一起（2026-10-25 用户要求）。 */
+    private var cellGapPx = 0
 
     /** 当前行数 / 列数（按屏幕尺寸自适应，分页容量 = columns × rows）。 */
     private var rows = ROWS_MIN
@@ -114,38 +118,58 @@ class GridActivity : AppCompatActivity() {
     /** 虚拟屏 VSYNC 保活（桌面不自动刷新的修复；真实屏自动跳过）。 */
     private val vsyncKeepAlive = VsyncKeepAlive(this)
 
+    /** 「自动」档下手机系统深浅色变化：昼夜资源不一致时重建本页（虚拟屏不自动收到该变化）。 */
+    private val themeNightListener: (Boolean) -> Unit = { _ ->
+        runOnUiThread {
+            if (!isFinishing &&
+                !isDestroyed &&
+                ThemePrefs.isNight(this) != ThemePrefs.targetNight(this)
+            ) {
+                recreate()
+            }
+        }
+    }
+
     /** 地图布局变化（全屏/分屏切换改变音乐卡壁纸切片区域）。
      *  具名字段（勿内联匿名 lambda）：onDestroy 才能对称移除，否则桌面重建累积泄漏。 */
     private val mapLayoutListener: (Boolean) -> Unit =
         { _ -> runOnUiThread { refreshDashWallpaper() } }
 
     /**
-     * 应用卡片视觉：暗幕 alpha 与壁纸模糊半径（RenderEffect，半径随网格屏
-     * 密度放大 1.5 倍以与 dock 视觉一致）。
+     * 应用卡片视觉：暗幕 alpha（与 dock 一致，按主题压白/压黑）。
+     *
+     * 模糊不再用 RenderEffect：它在虚拟屏上长时间空闲后会被系统回收，整张音乐卡
+     * 渲染成黑块（触摸才恢复，2026-10-25 实车实测；每秒空闲重绘也救不回来）。
+     * 改为在 [refreshDashWallpaper] 里**预模糊位图**，ImageView 只持有普通位图。
      */
     private fun applyDashCardChrome() {
         val panel = dashboardView ?: return
         val scrim = panel.findViewById<View>(R.id.dashScrim)
         val alpha = (DockPrefs.scrimOpacity(this) * 255 / 100).coerceIn(0, 255)
+        // 暗幕基色随主题：白天压白、夜间压黑（否则白底壁纸被黑幕压暗，深色文字看不清）
         scrim.background =
-            android.graphics.drawable.ColorDrawable(
-                android.graphics.Color.argb(alpha, 0, 0, 0),
-            )
-        val wallpaper = panel.findViewById<ImageView>(R.id.dashWallpaper)
-        val percent = DockPrefs.blur(this)
-        if (percent <= 0) {
-            wallpaper.setRenderEffect(null)
-        } else {
-            val radius = percent / 100f * 40f * resources.displayMetrics.density
-            wallpaper.setRenderEffect(
-                android.graphics.RenderEffect.createBlurEffect(
-                    radius,
-                    radius,
-                    android.graphics.Shader.TileMode.CLAMP,
-                ),
-            )
-        }
+            GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dashCardRadiusPx()
+                setColor(
+                    with(androidx.core.content.ContextCompat.getColor(this@GridActivity, R.color.car_scrim)) {
+                        android.graphics.Color.argb(
+                            alpha,
+                            android.graphics.Color.red(this),
+                            android.graphics.Color.green(this),
+                            android.graphics.Color.blue(this),
+                        )
+                    },
+                )
+            }
     }
+
+    /** 音乐卡圆角（与 DashboardHolder.bind 的 outline 同源：边距 × 1.4）。 */
+    private fun dashCardRadiusPx(): Float =
+        (CARD_MARGIN_PX * VirtualLauncher.gridScale()).toInt() * 1.4f
+
+    /** 最近一次生成的音乐卡壁纸切片（模糊+圆角）；空闲重绘时重设它以强制重新上传纹理。 */
+    private var dashBitmap: Bitmap? = null
 
     /**
      * 音乐卡壁纸：全画布切片中「音乐卡区域」的裁剪（与全屏壁纸同映射，
@@ -189,14 +213,66 @@ class GridActivity : AppCompatActivity() {
             }
             val cropW = (bitmap.width - cropX - margin).coerceAtLeast(2)
             val cropH = (bitmap.height - cropY - margin).coerceAtLeast(2)
+            val crop = Bitmap.createBitmap(bitmap, cropX, cropY, cropW, cropH)
+            // 预模糊 + 圆角：不再依赖 RenderEffect / clipToOutline（这两个硬件层在
+            // 虚拟屏空闲时会被回收，整块渲染成黑）
+            val percent = DockPrefs.blur(this@GridActivity)
+            val radius = percent / 100f * 40f * resources.displayMetrics.density
+            val blurred = if (percent > 0) blurBitmap(crop, radius) else crop
+            val rounded = roundBitmap(blurred, dashCardRadiusPx())
             runOnUiThread {
-                wallpaper.setImageBitmap(
-                    Bitmap.createBitmap(bitmap, cropX, cropY, cropW, cropH),
-                )
-                // 位图就绪后重申 RenderEffect（视图特效在位图更新后仍需生效）
+                dashBitmap = rounded
+                wallpaper.setImageBitmap(rounded)
                 applyDashCardChrome()
             }
         }
+    }
+
+    /**
+     * 近似高斯模糊：先缩小再用双线性放大。
+     * 在后台线程执行，结果位图直接交给 ImageView——省掉 RenderEffect 层。
+     */
+    private fun blurBitmap(
+        src: Bitmap,
+        radiusPx: Float,
+    ): Bitmap {
+        val factor = (radiusPx / 2.5f).coerceIn(1f, 48f)
+        val smallW = (src.width / factor).toInt().coerceAtLeast(1)
+        val smallH = (src.height / factor).toInt().coerceAtLeast(1)
+        if (smallW >= src.width && smallH >= src.height) return src
+        val small = Bitmap.createScaledBitmap(src, smallW, smallH, true)
+        val out = Bitmap.createScaledBitmap(small, src.width, src.height, true)
+        if (small !== out && small !== src) small.recycle()
+        return out
+    }
+
+    /** 把位图四角裁成圆角（替代 clipToOutline，避免硬件裁剪层被回收后变黑）。 */
+    private fun roundBitmap(
+        src: Bitmap,
+        radiusPx: Float,
+    ): Bitmap {
+        if (radiusPx <= 0f) return src
+        val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(out)
+        // 用 BitmapShader + drawRoundRect 而不是 clipPath：软件 Canvas 的 clipPath 不做抗锯齿，圆角会有锯齿
+        val paint =
+            android.graphics.Paint(
+                android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG,
+            ).apply {
+                shader =
+                    android.graphics.BitmapShader(
+                        src,
+                        android.graphics.Shader.TileMode.CLAMP,
+                        android.graphics.Shader.TileMode.CLAMP,
+                    )
+            }
+        canvas.drawRoundRect(
+            android.graphics.RectF(0f, 0f, src.width.toFloat(), src.height.toFloat()),
+            radiusPx,
+            radiusPx,
+            paint,
+        )
+        return out
     }
 
     /** 音乐卡进度自刷新（1s；渲染尾部续调度，位置由锚点+速度推算）。 */
@@ -209,6 +285,103 @@ class GridActivity : AppCompatActivity() {
         }
 
     private val tickHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** 空闲保活重绘日志节流（uptimeMillis）。 */
+    private var lastIdleRefreshLogAt = 0L
+
+    /** 地图卡空闲保活：上次观察到的地图屏帧号与时刻。 */
+    private var lastMapFrameCount = -1
+    private var lastMapFrameAt = 0L
+
+    /**
+     * 地图卡空闲保活：地图屏（高德等）长时间没有新帧时，其虚拟屏内容会被系统回收、
+     * 卡片渲染成黑块（触摸才恢复，用户 2026-10-25 实测）。每隔
+     * [MAP_KEEP_ALIVE_CHECK_MS] 检查帧号，静止超过 [MAP_IDLE_MS] 就逼地图重绘一次。
+     */
+    private val mapKeepAliveTick =
+        object : Runnable {
+            override fun run() {
+                runCatching { checkMapKeepAlive() }
+                tickHandler.postDelayed(this, MAP_KEEP_ALIVE_CHECK_MS)
+            }
+        }
+
+    private fun checkMapKeepAlive() {
+        val frames = VirtualLauncher.mapFrameCount()
+        val now = android.os.SystemClock.uptimeMillis()
+        if (frames != lastMapFrameCount) {
+            lastMapFrameCount = frames
+            lastMapFrameAt = now
+            return
+        }
+        // 地图屏未创建 / 不在仪表盘页（地图卡不可见）时不打扰
+        if (frames <= 0 || !VirtualLauncher.dashboardMode) return
+        if (now - lastMapFrameAt < MAP_IDLE_MS) return
+        lastMapFrameAt = now
+        VirtualLauncher.nudgeMapDisplay()
+    }
+
+    /**
+     * 空闲整页重绘（[VsyncKeepAlive.onIdleRefresh] 回调）：虚拟屏长时间无触摸时，
+     * 位图纹理 / 裁剪层 / 模糊层会被系统回收，表现成「音乐卡 + 背景 + 翻页圆点变黑，
+     * 触摸才恢复」。单纯 invalidate 在虚拟屏上不足以让 Surface 产出新帧（用户实测
+     * 带 1px poke 的版本仍会黑），这里做完整重绘：requestLayout + invalidate 根视图，
+     * 并重新 setImageBitmap 两张壁纸（同名位图重设也会逼 ImageView 重新上传纹理）。
+     * 只重绘，不改数据/布局语义；日志 30s 节流。
+     */
+    private fun refreshIdleContent() {
+        val root = findViewById<ViewGroup>(android.R.id.content) ?: return
+        root.requestLayout()
+        root.invalidate()
+        reapplyBitmap(wallpaperView)
+        dashboardView?.let { panel ->
+            panel.invalidate()
+            panel.findViewById<View>(R.id.musicCard)?.invalidate()
+            // 重设同一张位图 → ImageView 重新上传纹理；同时按当前主题重建暗幕
+            val wallpaper = panel.findViewById<ImageView>(R.id.dashWallpaper)
+            val cached = dashBitmap
+            if (wallpaper != null && cached != null && !cached.isRecycled) {
+                wallpaper.setImageBitmap(cached)
+                wallpaper.invalidate()
+                applyDashCardChrome()
+            } else {
+                reapplyBitmap(wallpaper)
+            }
+        }
+        // 翻页圆点：重建每个圆点的 drawable（沿用旧 drawable 时其显示列表可能已被回收呈黑色）
+        dotsRow?.let { row ->
+            val current = pager?.currentItem ?: 0
+            val idle = androidx.core.content.ContextCompat.getColor(this, R.color.car_page_dot)
+            val sel = androidx.core.content.ContextCompat.getColor(this, R.color.car_page_dot_sel)
+            for (i in 0 until row.childCount) {
+                row.getChildAt(i).background =
+                    GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(if (i == current) sel else idle)
+                    }
+            }
+            row.requestLayout()
+            row.invalidate()
+        }
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastIdleRefreshLogAt >= 30_000L) {
+            lastIdleRefreshLogAt = now
+            VirtualLauncher.logSink?.invoke("GRID: 空闲保活重绘（卡片/背景变黑防护）")
+        }
+    }
+
+    /** 重新设置同一个壁纸位图：触发 ImageView 重新上传纹理（纹理被回收时画面会变黑）。 */
+    private fun reapplyBitmap(view: ImageView?) {
+        val bmp = (view?.drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap ?: return
+        if (bmp.isRecycled) return
+        view.setImageBitmap(bmp)
+        view.invalidate()
+    }
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        vsyncKeepAlive.noteInteraction()
+    }
 
     /** mm:ss（超 1 小时 h:mm:ss）。 */
     private fun formatTime(ms: Long): String {
@@ -341,9 +514,15 @@ class GridActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ThemePrefs.applyToActivity(this)
+        ThemePrefs.addNightListener(themeNightListener)
         DockPrefs.syncRatio(this) // 冷启动时把持久化的 splitRatio 加载到全局变量（SPLIT_MAP_WIDTH_RATIO）
         setContentView(R.layout.activity_grid)
         vsyncKeepAlive.install()
+        // 空闲整页重绘：防卡片（音乐卡）长时间无触摸后被系统回收渲染成黑块
+        vsyncKeepAlive.onIdleRefresh = { refreshIdleContent() }
+        // 地图卡空闲保活轮询（地图屏静止过久 → 逼地图应用重绘）
+        tickHandler.postDelayed(mapKeepAliveTick, MAP_KEEP_ALIVE_CHECK_MS)
 
         // 格子尺寸/行数按屏幕动态计算（布局关系在 XML，尺寸测量在代码）
         computeCellMetrics()
@@ -410,7 +589,11 @@ class GridActivity : AppCompatActivity() {
                 offscreenPageLimit = 2
                 adapter = PageAdapter()
             }
-        dotsRow = findViewById(R.id.dotsRow)
+        dotsRow = findViewById<LinearLayout>(R.id.dotsRow).apply {
+            // 软件层：圆点是极小的矢量/形状，走 CPU 光栅化可避免硬件显示列表
+            // 长时间空闲后被回收（表现为整排圆点变黑）
+            setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+        }
         pager?.registerOnPageChangeCallback(
             object : ViewPager2.OnPageChangeCallback() {
                 override fun onPageSelected(position: Int) {
@@ -538,15 +721,18 @@ class GridActivity : AppCompatActivity() {
             iconSizePx = 0
             return
         }
+        val gapPx = (GRID_GAP_DP * density).toInt()
+        cellGapPx = gapPx
         val minCellPx = (MIN_CELL_SIZE_DP * density).toInt()
         var bestColumns = COLUMNS_DEFAULT
         var bestRows = ROWS_MIN
         var bestScore = Float.MAX_VALUE
         for (c in COLUMNS_MIN..COLUMNS_MAX) {
-            val cw = usableW / c
+            // 格宽 = (可用宽 - 列间 gap) / 列数（首列无左外边距，其余列左侧 gap）
+            val cw = (usableW - (c - 1) * gapPx) / c
             if (cw < minCellPx) continue
             for (r in ROWS_MIN..ROWS_MAX) {
-                val ch = usableH / r
+                val ch = (usableH - (r - 1) * gapPx) / r
                 if (ch < minCellPx) continue
                 val score = kotlin.math.abs(ch.toFloat() / cw.toFloat() - CELL_HEIGHT_RATIO)
                 val better =
@@ -561,15 +747,59 @@ class GridActivity : AppCompatActivity() {
         }
         columns = bestColumns
         rows = bestRows
-        cellWidthPx = usableW / columns
-        cellHeightPx = usableH / rows
+        cellWidthPx = (usableW - (columns - 1) * gapPx) / columns
+        cellHeightPx = (usableH - (rows - 1) * gapPx) / rows
+        // CarPlay 规格（2026-10-26）：图标在格子里占比略放大（0.63→0.65 / 0.72→0.76）
         iconSizePx =
-            (cellHeightPx * 0.63f)
-                .toInt()
-                .coerceAtMost((cellWidthPx * 0.72f).toInt())
+            minOf(
+                (cellHeightPx * 0.65f).toInt(),
+                (cellWidthPx * 0.76f).toInt(),
+            )
         VirtualLauncher.logSink?.invoke(
             "GRID: 自适应 ${columns}列×${rows}行（每页 ${columns * rows} 个）" +
                 " 屏=${dm.widthPixels}×${dm.heightPixels}@${dm.densityDpi}dpi",
+        )
+    }
+
+    /**
+     * 仪表盘面板的自适应密度上下文。
+     *
+     * 面板内容按固定 dp 排版，但卡片实际像素尺寸随车机分辨率变化：窄屏（如 1024×600）
+     * 上音乐卡只有 ~240dp 宽，而按钮行固定宽 158dp + 内边距，仍可能被裁；右上角
+     * 导航入口的文案也会换行（2026-10-25 用户反馈「显示会乱/按钮显示不全」）。
+     *
+     * 对策：按卡片真实像素尺寸反推一个「fit 密度」——保证卡片逻辑宽度 ≥
+     * [DASH_REF_WIDTH_DP]、逻辑高度 ≥ [DASH_REF_HEIGHT_DP]，整张面板等比缩小；
+     * 宽车机（卡片本来就够大）不覆盖，保持原生密度与原有观感。
+     */
+    private fun dashboardContext(): Context {
+        val dm = resources.displayMetrics
+        val scale = VirtualLauncher.gridScale()
+        val cardMargin = (CARD_MARGIN_PX * scale).toInt()
+        val bottomInset = maxOf(cardMargin, (VirtualLauncher.dotsBandStreamPx() * scale).toInt())
+        // 与 DashboardHolder.bind 的 MarginLayoutParams 同源推导，保证换算的卡片尺寸一致
+        val cardWidthPx: Int
+        val cardHeightPx: Int
+        if (VirtualLauncher.dockAtBottom) {
+            cardWidthPx = dm.widthPixels - cardMargin * 2
+            cardHeightPx =
+                dm.heightPixels -
+                (cardMargin * 2 + (VirtualLauncher.mapTileHeight * scale).toInt()) -
+                bottomInset
+        } else {
+            val leftMargin =
+                ((VirtualLauncher.appAreaWidth * SPLIT_MAP_WIDTH_RATIO + CARD_MARGIN_PX / 2) * scale).toInt()
+            cardWidthPx = dm.widthPixels - leftMargin - cardMargin
+            cardHeightPx = dm.heightPixels - cardMargin - bottomInset
+        }
+        if (cardWidthPx <= 0 || cardHeightPx <= 0) return this
+        val fitDpi =
+            (160f * minOf(cardWidthPx / DASH_REF_WIDTH_DP, cardHeightPx / DASH_REF_HEIGHT_DP)).toInt()
+        if (fitDpi <= 0 || fitDpi >= dm.densityDpi * 0.97f) return this
+        val config = android.content.res.Configuration(resources.configuration).apply { densityDpi = fitDpi }
+        return androidx.appcompat.view.ContextThemeWrapper(
+            createConfigurationContext(config),
+            R.style.Theme_CarPlaySender_Launcher,
         )
     }
 
@@ -623,7 +853,13 @@ class GridActivity : AppCompatActivity() {
             viewType: Int,
         ): RecyclerView.ViewHolder =
             if (viewType == 0) {
-                DashboardHolder(layoutInflater.inflate(R.layout.view_dashboard, parent, false))
+                // 仪表盘面板用自适应密度上下文 inflate：窄屏上面板整体等比缩小
+                // （固定 dp 布局在窄卡片里会溢出，见 dashboardContext 注释）
+                DashboardHolder(
+                    android.view.LayoutInflater
+                        .from(dashboardContext())
+                        .inflate(R.layout.view_dashboard, parent, false),
+                )
             } else {
                 val grid = layoutInflater.inflate(R.layout.item_grid_page, parent, false) as GridLayout
                 grid.columnCount = columns
@@ -644,12 +880,35 @@ class GridActivity : AppCompatActivity() {
     }
 
     /**
-     * 导航快捷入口：按 DockPrefs 的家/单位地址拼地图 URI 并在应用屏拉起。
-     * 地址为空 → 提示去设置页配置；URI 方案：
-     *  高德 amapuri://route/plan/?dname=<编码地址>&dev=0&t=0
-     *  百度 baidumap://map/direction?destination=<编码地址>&mode=driving
+     * 导航快捷入口：用「车机设置 → 默认地图」里选定的应用，在车机地图屏拉起家/单位路线。
+     *
+     * 高德车机版走它自己的「回家/去公司」widget 广播（实测 `androidauto://route?dname=`
+     * 只带名称会提示「路线请求失败」，而广播能直接规划到车机版里配置的地址）；
+     * 其它地图走 URI（高德手机版 amapuri / 百度 baidumap）。
      */
     private fun launchNavDestination(home: Boolean) {
+        val defaultPkg = VirtualLauncher.defaultMapComponent(this)?.packageName
+        // 高德车机版：地址保存在它自己的设置里，广播最可靠（2026-10-26 实车验证）
+        if (defaultPkg == "com.autonavi.amapauto") {
+            val action =
+                if (home) {
+                    "com.autonavi.amapauto.AUTO_WIDGET_GO_HOME"
+                } else {
+                    "com.autonavi.amapauto.AUTO_WIDGET_GO_COMPANY"
+                }
+            Bg.run("launch-nav") {
+                // 先确保车机版在地图屏前台（否则广播可能把导航落到手机屏/无任务）
+                VirtualLauncher.launchApp(
+                    android.content.ComponentName(defaultPkg, "com.autonavi.amapauto.MainMapActivity"),
+                )
+                Thread.sleep(1_200)
+                val result = io.github.shaonialife.cardeck.shizuku.Shell.exec("am broadcast -a $action", timeoutMs = 5_000)
+                VirtualLauncher.logSink?.invoke(
+                    "NAV: 高德车机版${if (home) "回家" else "回单位"}广播 ok=${result.ok} out=${result.output.take(80)}",
+                )
+            }
+            return
+        }
         val address =
             if (home) {
                 DockPrefs.navHomeAddress(this)
@@ -664,21 +923,17 @@ class GridActivity : AppCompatActivity() {
             return
         }
         val encoded = java.net.URLEncoder.encode(address, "UTF-8")
-        val baidu = DockPrefs.navMapApp(this) == DockPrefs.NAV_APP_BAIDU
+        // 不同地图的 scheme 不同：
+        //  高德手机版 amapuri://（只由 com.autonavi.minimap 的跳板处理）
+        //  百度 baidumap://
         val uri =
-            if (baidu) {
+            if (defaultPkg == "com.baidu.BaiduMap") {
                 "baidumap://map/direction?destination=$encoded&mode=driving"
             } else {
                 "amapuri://route/plan/?dname=$encoded&dev=0&t=0"
             }
-        // 处理该 scheme 的候选包按优先级给出（车机版优先于手机版）：
-        // 隐式启动会被跳板组件劫持回手机侧任务，launchNavUri 内部显式解析组件。
-        val preferPackages =
-            if (baidu) {
-                listOf("com.baidu.BaiduMap")
-            } else {
-                listOf("com.autonavi.amapauto", "com.autonavi.minimap")
-            }
+        // 只把默认地图包交给 launchNavUri（不兜底到其它地图，避免落到未选中的版本）
+        val preferPackages = listOfNotNull(defaultPkg)
         Bg.run("launch-nav") { VirtualLauncher.launchNavUri(uri, preferPackages) }
     }
 
@@ -734,8 +989,10 @@ class GridActivity : AppCompatActivity() {
                 clipToOutline = true
             }
             panel.findViewById<View>(R.id.musicCard).apply {
+                // 圆角由「预裁圆角的壁纸位图 + 圆角暗幕」表达：不再用 clipToOutline
+                // （裁剪层长时间空闲会被回收，整卡变黑）
                 outlineProvider = roundOutline
-                clipToOutline = true
+                clipToOutline = false
             }
             panel.findViewById<View>(R.id.navHome).setOnClickListener {
                 launchNavDestination(home = true)
@@ -792,7 +1049,7 @@ class GridActivity : AppCompatActivity() {
     ) : RecyclerView.ViewHolder(grid) {
         fun bind(page: Int) {
             grid.removeAllViews()
-            pages[page].forEach { cell ->
+            pages[page].forEachIndexed { index, cell ->
                 val view = layoutInflater.inflate(R.layout.item_app_cell, grid, false)
                 val icon =
                     view.findViewById<ImageView>(R.id.cellIcon).apply {
@@ -822,6 +1079,12 @@ class GridActivity : AppCompatActivity() {
                     GridLayout.LayoutParams().apply {
                         width = cellWidthPx
                         height = cellHeightPx
+                        // 间距：第 0 列/行的格不设起始外边距，其余格左侧/上方留 [cellGapPx]——
+                        // 总宽高仍等于可用区域（格子尺寸已按 gap 扣除）。
+                        if (columns > 0) {
+                            if (index % columns != 0) marginStart = cellGapPx
+                            if (index / columns != 0) topMargin = cellGapPx
+                        }
                     },
                 )
             }
@@ -910,8 +1173,11 @@ class GridActivity : AppCompatActivity() {
         return GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = 16 * density
-            setColor(0x22FFFFFF)
-            setStroke((2 * density).toInt(), 0xAAFFFFFF.toInt())
+            setColor(androidx.core.content.ContextCompat.getColor(this@GridActivity, R.color.car_focus_fill))
+            setStroke(
+                (2 * density).toInt(),
+                androidx.core.content.ContextCompat.getColor(this@GridActivity, R.color.car_focus_stroke),
+            )
         }
     }
 
@@ -988,7 +1254,7 @@ class GridActivity : AppCompatActivity() {
                     background =
                         android.graphics.drawable.GradientDrawable().apply {
                             shape = android.graphics.drawable.GradientDrawable.OVAL
-                            setColor(0x66FFFFFF)
+                            setColor(androidx.core.content.ContextCompat.getColor(this@GridActivity, R.color.car_page_dot))
                         }
                 },
                 LinearLayout.LayoutParams((6 * density).toInt(), (6 * density).toInt()).apply {
@@ -1002,14 +1268,17 @@ class GridActivity : AppCompatActivity() {
 
     private fun updateDots(selected: Int) {
         val row = dotsRow ?: return
+        val dotIdle = androidx.core.content.ContextCompat.getColor(this, R.color.car_page_dot)
+        val dotSel = androidx.core.content.ContextCompat.getColor(this, R.color.car_page_dot_sel)
         for (i in 0 until row.childCount) {
             (row.getChildAt(i).background as? android.graphics.drawable.GradientDrawable)
-                ?.setColor(if (i == selected) 0xFFFFFFFF.toInt() else 0x66FFFFFF.toInt())
+                ?.setColor(if (i == selected) dotSel else dotIdle)
         }
     }
 
     override fun onDestroy() {
         tickHandler.removeCallbacks(mediaTick)
+        tickHandler.removeCallbacks(mapKeepAliveTick)
         WallpaperStore
             .removeListener(wallpaperListener)
         VirtualLauncher.removeDashboardListener(dashboardListener)
@@ -1019,6 +1288,7 @@ class GridActivity : AppCompatActivity() {
         DockPrefs.removeListener(dockPrefsListener)
         WallpaperStore
             .removeCanvasReadyListener(canvasReadyListener)
+        ThemePrefs.removeNightListener(themeNightListener)
         vsyncKeepAlive.release()
         super.onDestroy()
     }
@@ -1042,6 +1312,17 @@ class GridActivity : AppCompatActivity() {
 
         /** 格子目标高宽比（高/宽）：搜索时最接近此比例的组合胜出。 */
         const val CELL_HEIGHT_RATIO = 1.25f
+
+        /** 格子间距（dp）：从可用宽高里扣除，避免图标/文字挤在一起（2026-10-25 用户要求）。 */
+        const val GRID_GAP_DP = 8
+
+        /** 仪表盘面板的设计基准卡宽/卡高（dp）：fit 密度保证卡片逻辑尺寸不小于此值。 */
+        const val DASH_REF_WIDTH_DP = 260f
+        const val DASH_REF_HEIGHT_DP = 300f
+
+        /** 地图卡空闲保活：检查间隔与判定阈值（地图屏帧号静止超过阈值即逼其重绘）。 */
+        const val MAP_KEEP_ALIVE_CHECK_MS = 10_000L
+        const val MAP_IDLE_MS = 15_000L
 
         /** [pendingSelectBoundary] 的空值：翻页后不自动选格。 */
         const val PENDING_NONE = Int.MIN_VALUE

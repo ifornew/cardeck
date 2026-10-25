@@ -4,5 +4,5 @@
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
     <corners android:radius="12dp" />
-    <solid android:color="#B323282E" />
+    <solid android:color="@color/car_nav_card_bg" />
 </shape>

@@ -3,7 +3,7 @@
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item>
         <shape android:shape="oval">
-            <solid android:color="#FF0A84FF" />
+            <solid android:color="@color/car_accent" />
         </shape>
     </item>
     <item

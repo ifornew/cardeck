@@ -8,7 +8,7 @@ import io.github.shaonialife.cardeck.render.SPLIT_MAP_WIDTH_RATIO
  *
  *  - scrimOpacity：dock 暗幕强度 0..100（%黑；0=壁纸清晰可见，100=全黑）
  *  - blur：背景高斯模糊强度 0..100（0=不模糊；映射到 RenderEffect 模糊半径）
- *  - splitRatio：横屏仪表盘地图/音乐卡分屏比例 50..80（%；地图占应用区宽度，音乐卡占剩余）
+ *  - splitRatio：横屏仪表盘地图/音乐卡分屏比例 50..75（%；地图占应用区宽度，音乐卡占剩余）
  *
  * splitRatio 同时写入 DualDisplayComposer.SPLIT_MAP_WIDTH_RATIO（@Volatile，GL 线程每帧重绘读一次），
  * 无需重启虚拟屏即可生效。监听器在主线程回调。
@@ -20,12 +20,6 @@ object DockPrefs {
     private const val KEY_SPLIT = "dockSplitRatio"
     private const val KEY_NAV_HOME = "navHomeAddress"
     private const val KEY_NAV_WORK = "navWorkAddress"
-    private const val KEY_NAV_APP = "navMapApp"
-
-    /** 导航地图 App 选择值（KEY_NAV_APP）。 */
-    const val NAV_APP_AMAP = "amap"
-
-    const val NAV_APP_BAIDU = "baidu"
 
     /** 暗幕强度默认值（%）。 */
     const val DEFAULT_SCRIM = 20
@@ -33,7 +27,7 @@ object DockPrefs {
     /** 模糊强度默认值（%）。 */
     const val DEFAULT_BLUR = 40
 
-    /** 横屏仪表盘分屏比例默认值（%地图占比；50..80）。 */
+    /** 横屏仪表盘分屏比例默认值（%地图占比；50..75）。 */
     const val DEFAULT_SPLIT = 75
 
     private val listeners = java.util.concurrent.CopyOnWriteArraySet<() -> Unit>()
@@ -52,8 +46,8 @@ object DockPrefs {
 
     fun blur(context: Context): Int = prefs(context).getInt(KEY_BLUR, DEFAULT_BLUR).coerceIn(0, 100)
 
-    /** 横屏仪表盘地图占比（%；50..80）。 */
-    fun splitRatio(context: Context): Int = prefs(context).getInt(KEY_SPLIT, DEFAULT_SPLIT).coerceIn(50, 80)
+    /** 横屏仪表盘地图占比（%；50..75；上限 75 防音乐卡被挤到按钮放不下）。 */
+    fun splitRatio(context: Context): Int = prefs(context).getInt(KEY_SPLIT, DEFAULT_SPLIT).coerceIn(50, 75)
 
     fun setScrimOpacity(
         context: Context,
@@ -71,12 +65,12 @@ object DockPrefs {
         notifyListeners()
     }
 
-    /** 设置横屏仪表盘地图占比（50..80）；同时更新 DualDisplayComposer.SPLIT_MAP_WIDTH_RATIO。 */
+    /** 设置横屏仪表盘地图占比（50..75）；同时更新 DualDisplayComposer.SPLIT_MAP_WIDTH_RATIO。 */
     fun setSplitRatio(
         context: Context,
         value: Int,
     ) {
-        val clamped = value.coerceIn(50, 80)
+        val clamped = value.coerceIn(50, 75)
         prefs(context).edit().putInt(KEY_SPLIT, clamped).apply()
         SPLIT_MAP_WIDTH_RATIO = clamped / 100f
         notifyListeners()
@@ -93,9 +87,6 @@ object DockPrefs {
     /** 导航快捷入口：单位地址（空串=未设置）。 */
     fun navWorkAddress(context: Context): String = prefs(context).getString(KEY_NAV_WORK, "") ?: ""
 
-    /** 导航地图 App（NAV_APP_AMAP / NAV_APP_BAIDU；默认高德）。 */
-    fun navMapApp(context: Context): String = prefs(context).getString(KEY_NAV_APP, NAV_APP_AMAP) ?: NAV_APP_AMAP
-
     fun setNavHomeAddress(
         context: Context,
         value: String,
@@ -108,13 +99,6 @@ object DockPrefs {
         value: String,
     ) {
         prefs(context).edit().putString(KEY_NAV_WORK, value.trim()).apply()
-    }
-
-    fun setNavMapApp(
-        context: Context,
-        value: String,
-    ) {
-        prefs(context).edit().putString(KEY_NAV_APP, value).apply()
     }
 
     private fun notifyListeners() {

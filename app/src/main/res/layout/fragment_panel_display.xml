@@ -14,14 +14,14 @@
         android:layout_marginTop="6dp"
         android:layout_marginBottom="11dp"
         android:text="视频流按车机分辨率的百分比生成虚拟屏与编码画面（逻辑布局不变）。分辨率改动下次连接起效；帧率为推流刷新频率，切换实时生效。"
-        android:textColor="#FF8E8E93"
+        android:textColor="@color/car_text_tertiary"
         android:textSize="12sp" />
 
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="流分辨率"
-        android:textColor="#FFF5F5F7"
+        android:textColor="@color/car_text_primary"
         android:textSize="14sp" />
 
     <LinearLayout
@@ -44,7 +44,7 @@
             android:layout_height="wrap_content"
             android:layout_marginLeft="8dp"
             android:gravity="right"
-            android:textColor="#FF8E8E93"
+            android:textColor="@color/car_text_tertiary"
             android:textSize="12sp" />
     </LinearLayout>
 
@@ -54,7 +54,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
         android:text="保存后下次连接起效"
-        android:textColor="#FF8E8E93"
+        android:textColor="@color/car_text_tertiary"
         android:textSize="12sp" />
 
     <TextView
@@ -62,80 +62,88 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
         android:text="目标帧率"
-        android:textColor="#FFF5F5F7"
+        android:textColor="@color/car_text_primary"
         android:textSize="14sp" />
 
     <LinearLayout
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="6dp"
         android:background="@drawable/bg_segment"
         android:orientation="horizontal"
         android:padding="3dp">
 
+        <!-- 四档等分宽度（每档 weight=1、宽度 0dp）：窄车机屏/大字号下也不会把
+             这一行撑出面板（此前 wrap_content + 18dp 左右内边距在窄屏上「显示不下而错乱」）。
+             禁用态由 DisplayPanelFragment 按车机握手 maxFPS 设置 alpha/点击性。 -->
         <TextView
             android:id="@+id/btnFps30"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_weight="1"
             android:background="@drawable/bg_segment_sel"
-            android:paddingLeft="18dp"
+            android:gravity="center"
+            android:maxLines="1"
             android:paddingTop="6dp"
-            android:paddingRight="18dp"
             android:paddingBottom="6dp"
-            android:text="30 fps"
-            android:textColor="#FFFFFFFF"
-            android:textSize="13sp"
+            android:text="30"
+            android:textColor="@color/car_segment_sel_text"
+            android:textSize="12sp"
             android:textStyle="bold" />
 
         <TextView
             android:id="@+id/btnFps60"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginLeft="2dp"
-            android:paddingLeft="18dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:maxLines="1"
             android:paddingTop="6dp"
-            android:paddingRight="18dp"
             android:paddingBottom="6dp"
-            android:text="60 fps"
-            android:textColor="#FF8E8E93"
-            android:textSize="13sp"
+            android:text="60"
+            android:textColor="@color/car_text_tertiary"
+            android:textSize="12sp"
             android:textStyle="bold" />
 
         <TextView
             android:id="@+id/btnFps90"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginLeft="2dp"
-            android:paddingLeft="18dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:maxLines="1"
             android:paddingTop="6dp"
-            android:paddingRight="18dp"
             android:paddingBottom="6dp"
-            android:text="90 fps"
-            android:textColor="#FF8E8E93"
-            android:textSize="13sp"
+            android:text="90"
+            android:textColor="@color/car_text_tertiary"
+            android:textSize="12sp"
             android:textStyle="bold" />
 
         <TextView
             android:id="@+id/btnFps120"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginLeft="2dp"
-            android:paddingLeft="18dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:maxLines="1"
             android:paddingTop="6dp"
-            android:paddingRight="18dp"
             android:paddingBottom="6dp"
-            android:text="120 fps"
-            android:textColor="#FF8E8E93"
-            android:textSize="13sp"
+            android:text="120"
+            android:textColor="@color/car_text_tertiary"
+            android:textSize="12sp"
             android:textStyle="bold" />
     </LinearLayout>
 
     <TextView
+        android:id="@+id/displayFpsNote"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="6dp"
-        android:text="连接中切换实时生效；英雄卡实时显示「实际/目标」帧率。90/120 fps 为实验档：实际帧率取决于编码器余量，功耗发热更高"
-        android:textColor="#FF8E8E93"
+        android:text="连接中切换实时生效；车机握手识别后会自动禁用其不支持的高档位。90/120 fps 为实验档：实际帧率取决于编码器余量，功耗发热更高"
+        android:textColor="@color/car_text_tertiary"
         android:textSize="12sp" />
 
     <TextView
@@ -143,7 +151,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
         android:text="触摸注入节流"
-        android:textColor="#FFF5F5F7"
+        android:textColor="@color/car_text_primary"
         android:textSize="14sp" />
 
     <LinearLayout
@@ -166,7 +174,7 @@
             android:layout_height="wrap_content"
             android:layout_marginLeft="8dp"
             android:gravity="right"
-            android:textColor="#FF8E8E93"
+            android:textColor="@color/car_text_tertiary"
             android:textSize="12sp" />
     </LinearLayout>
 
@@ -175,6 +183,6 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
         android:text="交互滞后但帧率正常（事件派发堆积）时调高试验；拖动即时生效"
-        android:textColor="#FF8E8E93"
+        android:textColor="@color/car_text_tertiary"
         android:textSize="12sp" />
 </LinearLayout>

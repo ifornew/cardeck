@@ -9,7 +9,6 @@ import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.RadioGroup
 import android.widget.SeekBar
 import android.widget.TextView
 import io.github.shaonialife.cardeck.R
@@ -149,7 +148,19 @@ class SupersamplePanelFragment : SettingsPanelFragment() {
             segs.forEach { (view, segMode) ->
                 val active = segMode == mode
                 view.background = if (active) requireActivity().getDrawable(R.drawable.bg_segment_sel) else null
-                view.setTextColor(if (active) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt())
+                view.setTextColor(
+                    if (active) {
+                        androidx.core.content.ContextCompat.getColor(
+                            requireContext(),
+                            R.color.car_segment_sel_text,
+                        )
+                    } else {
+                        androidx.core.content.ContextCompat.getColor(
+                            requireContext(),
+                            R.color.car_text_tertiary,
+                        )
+                    },
+                )
             }
         }
     }
@@ -377,7 +388,12 @@ class OrientationPanelFragment : SettingsPanelFragment() {
             when {
                 onSystem && enabled -> {
                     hint.text = "已开启横屏（会话期间生效）"
-                    hint.setTextColor(0xFF8E8E93.toInt())
+                    hint.setTextColor(
+                        androidx.core.content.ContextCompat.getColor(
+                            requireContext(),
+                            R.color.car_text_tertiary,
+                        ),
+                    )
                     hint.visibility = View.VISIBLE
                     hint.setOnClickListener(null)
                     hint.isClickable = false
@@ -490,7 +506,7 @@ class DockPanelFragment : SettingsPanelFragment() {
             },
         )
 
-        // 仪表盘分屏比例：SeekBar 范围 0..30 映射到 50..80%（DockPrefs.splitRatio 存真实百分比）
+        // 仪表盘分屏比例：SeekBar 范围 0..25 映射到 50..75%（DockPrefs.splitRatio 存真实百分比）
         splitSeek.progress = DockPrefs.splitRatio(requireContext()) - 50
         splitValue.text = "${DockPrefs.splitRatio(requireContext())}%"
         splitSeek.setOnSeekBarChangeListener(
@@ -512,10 +528,9 @@ class DockPanelFragment : SettingsPanelFragment() {
             },
         )
 
-        // 导航快捷入口：家/单位地址（失焦或回车保存）+ 地图 App 选择（高德/百度）
+        // 导航快捷入口：家/单位地址（失焦或回车保存）。地图 App 跟随「默认地图」设置
         val homeInput = view.findViewById<EditText>(R.id.navHomeInput)
         val workInput = view.findViewById<EditText>(R.id.navWorkInput)
-        val appGroup = view.findViewById<RadioGroup>(R.id.navAppGroup)
         homeInput.setText(DockPrefs.navHomeAddress(requireContext()))
         workInput.setText(DockPrefs.navWorkAddress(requireContext()))
         homeInput.addTextChangedListener(
@@ -540,19 +555,6 @@ class DockPanelFragment : SettingsPanelFragment() {
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
             },
         )
-        appGroup.check(
-            if (DockPrefs.navMapApp(requireContext()) == DockPrefs.NAV_APP_BAIDU) {
-                R.id.navAppBaidu
-            } else {
-                R.id.navAppAmap
-            },
-        )
-        appGroup.setOnCheckedChangeListener { _, checkedId ->
-            DockPrefs.setNavMapApp(
-                requireContext(),
-                if (checkedId == R.id.navAppBaidu) DockPrefs.NAV_APP_BAIDU else DockPrefs.NAV_APP_AMAP,
-            )
-        }
     }
 }
 
@@ -584,7 +586,12 @@ class DefaultMapPanelFragment : SettingsPanelFragment() {
             container.addView(
                 TextView(requireContext()).apply {
                     text = "未安装任何受支持的地图应用（高德/百度/腾讯）"
-                    setTextColor(0xFF8E8E93.toInt())
+                    setTextColor(
+                        androidx.core.content.ContextCompat.getColor(
+                            requireContext(),
+                            R.color.car_text_tertiary,
+                        ),
+                    )
                     textSize = 13f
                 },
             )
@@ -634,6 +641,15 @@ class DefaultMapPanelFragment : SettingsPanelFragment() {
  * 与本页偏好值相区别。
  */
 class DisplayPanelFragment : SettingsPanelFragment() {
+    /** 车机能力轮询（握手晚于设置页打开时靠它刷新档位可用性；视图销毁时移除）。 */
+    private var fpsPollRef: Runnable? = null
+
+    override fun onDestroyView() {
+        fpsPollRef?.let { view?.removeCallbacks(it) }
+        fpsPollRef = null
+        super.onDestroyView()
+    }
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -695,23 +711,54 @@ class DisplayPanelFragment : SettingsPanelFragment() {
             },
         )
 
+        val fpsNote = view.findViewById<TextView>(R.id.displayFpsNote)
+
+        // 车机能力上限（握手后可知；0=未知）：高于上限的档位禁用——SessionController
+        // 建流时会把它们夹紧，选着也只会白增编码开销与无效帧（2026-10-25 用户要求）。
+        fun carLimit() = SessionController.carMaxFps.takeIf { it in 24..240 } ?: 0
+
         fun refreshFps(active: Int) {
+            val limit = carLimit()
+            // 偏好可能是在别的车机（更高上限）上存的：这里高亮**实际生效**的档位，
+            // 否则会出现「四个都没选中」的空档（SessionController 建流时同样会夹紧）。
+            val effective = if (limit > 0 && active > limit) limit else active
             // 未选中片用暗色底（与容器同色）而非 null 背景，避免背景重置内边距
             listOf(fps30 to 30, fps60 to 60, fps90 to 90, fps120 to 120).forEach { (chip, value) ->
-                val selected = value == active
+                val supported = limit == 0 || value <= limit
+                val selected = value == effective && supported
+                chip.isEnabled = supported
+                chip.alpha = if (supported) 1f else 0.32f
                 chip.setBackgroundResource(
                     if (selected) R.drawable.bg_segment_sel else R.drawable.bg_segment,
                 )
                 chip.setTextColor(
-                    if (selected) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt(),
+                    if (selected) {
+                        androidx.core.content.ContextCompat.getColor(ctx, R.color.car_segment_sel_text)
+                    } else {
+                        androidx.core.content.ContextCompat.getColor(
+                            ctx,
+                            R.color.car_text_tertiary,
+                        )
+                    },
                 )
             }
+            fpsNote.text =
+                if (limit > 0) {
+                    "当前车机最高支持 ${limit}fps，更高档位已禁用。连接中切换实时生效；实际帧率还取决于编码器余量"
+                } else {
+                    "连接中切换实时生效；车机握手识别后会自动禁用其不支持的高档位。90/120 fps 为实验档：实际帧率取决于编码器余量，功耗发热更高"
+                }
         }
 
         val savedFps = DisplayPrefs.fps(ctx)
         refreshFps(savedFps)
 
         fun applyFps(fps: Int) {
+            val limit = carLimit()
+            if (limit > 0 && fps > limit) {
+                hostToast("当前车机最高支持 ${limit}fps")
+                return
+            }
             DisplayPrefs.setFps(ctx, fps)
             refreshFps(fps)
             VirtualLauncher
@@ -726,6 +773,19 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         fps60.setOnClickListener { applyFps(60) }
         fps90.setOnClickListener { applyFps(90) }
         fps120.setOnClickListener { applyFps(120) }
+
+        // 设置页可能先于车机握手打开：每 2s 对账一次车机上限/运行时生效值，握手完成即
+        // 立刻禁用不支持的档位（poll 随视图销毁移除）。
+        val fpsPoll =
+            object : Runnable {
+                override fun run() {
+                    if (!isAdded) return
+                    refreshFps(DisplayPrefs.fps(requireContext()))
+                    view.postDelayed(this, 2_000)
+                }
+            }
+        fpsPollRef = fpsPoll
+        view.postDelayed(fpsPoll, 2_000)
 
         // 触摸注入节流（0=关闭，步进 8ms）：缓解「交互滞后但帧率正常」的事件堆积
         val throttleSeek = view.findViewById<SeekBar>(R.id.throttleSeek)
@@ -761,5 +821,84 @@ class DisplayPanelFragment : SettingsPanelFragment() {
                 }
             },
         )
+    }
+}
+
+/**
+ * 「外观主题」面板：自动 / 白天 / 黑夜三档（[ThemePrefs]）。
+ * 自动档目前跟随手机系统深浅色，车机昼夜信号接入后自动优先车机信号。
+ */
+class ThemePanelFragment : SettingsPanelFragment() {
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?,
+    ): View = inflater.inflate(R.layout.fragment_panel_theme, container, false)
+
+    override fun onViewCreated(view: View) {
+        val ctx = requireContext()
+        val auto = view.findViewById<TextView>(R.id.btnThemeAuto)
+        val day = view.findViewById<TextView>(R.id.btnThemeDay)
+        val night = view.findViewById<TextView>(R.id.btnThemeNight)
+
+        fun refresh(active: Int) {
+            listOf(auto to ThemePrefs.AUTO, day to ThemePrefs.DAY, night to ThemePrefs.NIGHT)
+                .forEach { (chip, mode) ->
+                    val selected = mode == active
+                    chip.setBackgroundResource(
+                        if (selected) R.drawable.bg_segment_sel else R.drawable.bg_segment,
+                    )
+                    chip.setTextColor(
+                        if (selected) {
+                            androidx.core.content.ContextCompat.getColor(ctx, R.color.car_segment_sel_text)
+                        } else {
+                            androidx.core.content.ContextCompat.getColor(
+                                ctx,
+                                R.color.car_text_tertiary,
+                            )
+                        },
+                    )
+                }
+        }
+
+        fun pick(mode: Int) {
+            if (ThemePrefs.mode(ctx) == mode) return
+            // 切换会触发车机侧 Activity 重建（主题资源重载），先给出提示再应用
+            hostToast(
+                when (mode) {
+                    ThemePrefs.DAY -> "外观：白天"
+                    ThemePrefs.NIGHT -> "外观：黑夜"
+                    else -> "外观：自动（跟随手机系统）"
+                },
+            )
+            ThemePrefs.setMode(ctx, mode)
+        }
+
+        auto.setOnClickListener { pick(ThemePrefs.AUTO) }
+        day.setOnClickListener { pick(ThemePrefs.DAY) }
+        night.setOnClickListener { pick(ThemePrefs.NIGHT) }
+
+        // 高德等镜像应用只读手机系统的深浅色：显式白天/黑夜时可选同步切系统
+        val sync = view.findViewById<TextView>(R.id.btnThemeSyncSystem)
+        fun refreshSync() {
+            val on = ThemePrefs.syncSystemNight(ctx)
+            sync.text = if (on) "同步系统深色：开" else "同步系统深色：关"
+            sync.setBackgroundResource(if (on) R.drawable.bg_menu_item else R.drawable.bg_segment)
+            sync.setTextColor(
+                androidx.core.content.ContextCompat.getColor(
+                    ctx,
+                    if (on) R.color.car_on_accent else R.color.car_text_primary,
+                ),
+            )
+        }
+        sync.setOnClickListener {
+            val on = !ThemePrefs.syncSystemNight(ctx)
+            ThemePrefs.setSyncSystemNight(ctx, on)
+            refreshSync()
+            hostToast(if (on) "已开启：切换白天/黑夜时同步手机系统深色（需 Shizuku）" else "已关闭系统深色同步")
+        }
+        refreshSync()
+
+        refresh(ThemePrefs.mode(ctx))
     }
 }

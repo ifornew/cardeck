@@ -24,7 +24,7 @@
         android:layout_height="wrap_content"
         android:layout_marginLeft="10dp"
         android:layout_weight="1"
-        android:textColor="#FFF5F5F7"
+        android:textColor="@color/car_text_primary"
         android:textSize="14sp" />
 
     <ImageView
