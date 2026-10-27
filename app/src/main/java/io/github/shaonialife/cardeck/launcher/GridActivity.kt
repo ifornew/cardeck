@@ -501,8 +501,25 @@ class GridActivity : AppCompatActivity() {
     /** 仪表盘模式 → pager 位置同步（0=仪表盘，1+=桌面；已在目标位则不动）。 */
     private fun applyDashboardMode(dashboard: Boolean) {
         val pager = findViewById<ViewPager2>(R.id.gridPager)
-        if (dashboard && pager.currentItem != 0) pager.setCurrentItem(0, false)
-        if (!dashboard && pager.currentItem == 0) pager.setCurrentItem(1, false)
+        if (dashboard) {
+            if (pager.currentItem != 0) pager.setCurrentItem(0, false)
+            return
+        }
+        // 先消费 home 键登记的落点（即使当前不需要移动，也要清掉，避免残留到下次翻页）
+        val target = exitDashboardPage((pager.adapter?.itemCount ?: 1) - 1)
+        if (pager.currentItem != 0) return
+        pager.setCurrentItem(target, false)
+    }
+
+    /**
+     * 退出仪表盘后要落的网格页码（>=1）：
+     *  - home 键从应用回来、且打开应用前不在仪表盘 → 回打开应用前那一页；
+     *  - 其它情况 → 回用户最近停留的网格页。都不再固定回第 1 个网格页。
+     */
+    private fun exitDashboardPage(last: Int): Int {
+        val restore = VirtualLauncher.consumeRestorePage()
+        val target = if (restore > 0) restore else VirtualLauncher.desktopGridPage
+        return target.coerceIn(1, last.coerceAtLeast(1))
     }
 
     /** 音乐控制：系统媒体键（AudioManager 全局路由给活跃媒体会话，无需权限）。 */
@@ -598,6 +615,8 @@ class GridActivity : AppCompatActivity() {
             object : ViewPager2.OnPageChangeCallback() {
                 override fun onPageSelected(position: Int) {
                     updateDots(position)
+                    // 记下用户所在的桌面页（含仪表盘页 0）：home 键从应用回来按此还原
+                    VirtualLauncher.rememberDesktopPage(position)
                     // 翻页落定：清掉旧页高亮，按旋钮方向把光标落在新页的边界格上
                     clearHighlight()
                     selectedIndex = -1
@@ -836,9 +855,20 @@ class GridActivity : AppCompatActivity() {
         pager?.adapter?.notifyDataSetChanged()
         rebuildDots()
         // 位置与仪表盘模式对账（home 键循环/应用启动会改 dashboardMode）：
-        // 仅纠偏方向，不把停在桌面第 N 页的用户拽回第 1 页
+        // 落点见 exitDashboardPage——回到打开应用前的页 / 最近停留的网格页，不固定第 1 页
         if (VirtualLauncher.dashboardMode && current != 0) pager?.setCurrentItem(0, false)
-        if (!VirtualLauncher.dashboardMode && current == 0) pager?.setCurrentItem(1, false)
+        if (!VirtualLauncher.dashboardMode) {
+            val at = pager?.currentItem ?: 0
+            val restore = VirtualLauncher.consumeRestorePage()
+            // 停在仪表盘页、或 home 键登记了落点时才移动；用户自己停在网格第 N 页就不拽
+            val want = when {
+                restore > 0 -> restore
+                at == 0 -> VirtualLauncher.desktopGridPage
+                else -> at
+            }
+            val target = want.coerceIn(1, (pages.size - 1).coerceAtLeast(1))
+            if (at != target) pager?.setCurrentItem(target, false)
+        }
         if ((pager?.currentItem ?: 0) >= pages.size) pager?.setCurrentItem(pages.size - 1, false)
         updateDots(pager?.currentItem ?: 0)
     }
@@ -918,7 +948,11 @@ class GridActivity : AppCompatActivity() {
         val label = if (home) "家" else "单位"
         if (address.isBlank()) {
             android.widget.Toast
-                .makeText(this, "未设置${label}地址——请在车机设置「dock 栏」页配置", android.widget.Toast.LENGTH_LONG)
+                .makeText(
+                    this,
+                    "快捷回家/回单位走高德车机版；请在「默认地图」中选用高德车机版",
+                    android.widget.Toast.LENGTH_LONG,
+                )
                 .show()
             return
         }

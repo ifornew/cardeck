@@ -1,12 +1,9 @@
 package io.github.shaonialife.cardeck.launcher.settings
 
 import android.os.Bundle
-import android.text.Editable
-import android.text.TextWatcher
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.SeekBar
@@ -527,34 +524,6 @@ class DockPanelFragment : SettingsPanelFragment() {
                 override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
             },
         )
-
-        // 导航快捷入口：家/单位地址（失焦或回车保存）。地图 App 跟随「默认地图」设置
-        val homeInput = view.findViewById<EditText>(R.id.navHomeInput)
-        val workInput = view.findViewById<EditText>(R.id.navWorkInput)
-        homeInput.setText(DockPrefs.navHomeAddress(requireContext()))
-        workInput.setText(DockPrefs.navWorkAddress(requireContext()))
-        homeInput.addTextChangedListener(
-            object : TextWatcher {
-                override fun afterTextChanged(s: Editable?) {
-                    DockPrefs.setNavHomeAddress(requireContext(), s?.toString() ?: "")
-                }
-
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-            },
-        )
-        workInput.addTextChangedListener(
-            object : TextWatcher {
-                override fun afterTextChanged(s: Editable?) {
-                    DockPrefs.setNavWorkAddress(requireContext(), s?.toString() ?: "")
-                }
-
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-            },
-        )
     }
 }
 
@@ -826,7 +795,7 @@ class DisplayPanelFragment : SettingsPanelFragment() {
 
 /**
  * 「外观主题」面板：自动 / 白天 / 黑夜三档（[ThemePrefs]）。
- * 自动档目前跟随手机系统深浅色，车机昼夜信号接入后自动优先车机信号。
+ * 自动档优先跟随车机昼夜信号，没有信号时跟随手机系统深浅色。
  */
 class ThemePanelFragment : SettingsPanelFragment() {
     override fun onCreateView(
@@ -868,10 +837,13 @@ class ThemePanelFragment : SettingsPanelFragment() {
                 when (mode) {
                     ThemePrefs.DAY -> "外观：白天"
                     ThemePrefs.NIGHT -> "外观：黑夜"
-                    else -> "外观：自动（跟随手机系统）"
+                    else -> "外观：自动（车机昼夜优先）"
                 },
             )
             ThemePrefs.setMode(ctx, mode)
+            // 立即回显：切到「自动」时若解析出的昼夜与当前一致，不会触发 Activity 重建，
+            // 不主动刷新的话按钮会停在旧档位（切白天/黑夜时靠重建「碰巧」刷新过）
+            refresh(ThemePrefs.mode(ctx))
         }
 
         auto.setOnClickListener { pick(ThemePrefs.AUTO) }
@@ -895,7 +867,7 @@ class ThemePanelFragment : SettingsPanelFragment() {
             val on = !ThemePrefs.syncSystemNight(ctx)
             ThemePrefs.setSyncSystemNight(ctx, on)
             refreshSync()
-            hostToast(if (on) "已开启：切换白天/黑夜时同步手机系统深色（需 Shizuku）" else "已关闭系统深色同步")
+            hostToast(if (on) "已开启：白天/黑夜及车机昼夜信号都会同步手机系统深色（需 Shizuku）" else "已关闭系统深色同步")
         }
         refreshSync()
 

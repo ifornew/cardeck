@@ -24,6 +24,7 @@ import io.github.shaonialife.cardeck.input.TouchRouter
 import io.github.shaonialife.cardeck.launcher.VirtualLauncher
 import io.github.shaonialife.cardeck.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
+import io.github.shaonialife.cardeck.launcher.settings.ThemePrefs
 import io.github.shaonialife.cardeck.net.AirPlayFeatures
 import io.github.shaonialife.cardeck.net.CarPlayCtrlAdvertiser
 import io.github.shaonialife.cardeck.net.CarPlayServiceBrowser
@@ -605,6 +606,12 @@ object SessionController {
         currentClient?.cancelled = true
         currentClient?.close()
         currentClient = null
+        // 车机昼夜信号随会话失效：断开后「自动」档退回跟随手机系统
+        appContext?.let { ctx ->
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                ThemePrefs.setCarNightSignal(ctx, null)
+            }
+        }
         // 注意：这里绝不能 detach BT 控制会话。本方法在每轮配对起步时也会执行，
         // 而 DiPlay 在 WiFi 隧道就绪前看到 RFCOMM 断开即判 bring-up failed、
         // closeWirelessStack 拆掉整轮无线栈（Bonjour/热点/AirPlay 服务），把已建立
@@ -2120,6 +2127,34 @@ object SessionController {
                                         // 回 modesChanged 声明手机持有主屏/主音频
                                         appendLog("EVENT: 车机请求 changeModes → 回 modesChanged 接管资源")
                                         client.assertModes()
+                                    }
+
+                                    "setNightMode" -> {
+                                        // 车机昼夜信号（/command type=setNightMode params={nightMode:Boolean}）。
+                                        // 交给 ThemePrefs：自动档下它优先于手机系统深色（显式白天/黑夜仍优先）。
+                                        // 事件通道回调在读取线程：AppCompat 的全局 night mode 只能主线程改。
+                                        val raw = (command["params"] as? Map<*, *>)?.get("nightMode")
+                                        val night =
+                                            when (raw) {
+                                                is Boolean -> raw
+                                                null -> null
+                                                else -> raw.toString().toBooleanStrictOrNull()
+                                            }
+                                        if (night == null) {
+                                            appendLog(
+                                                "EVENT: 车机昼夜信号 setNightMode 缺少 nightMode（params=${command["params"]}，忽略）",
+                                            )
+                                        } else {
+                                            appContext?.let { ctx ->
+                                                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                                    ThemePrefs.setCarNightSignal(ctx, night)
+                                                }
+                                            }
+                                            appendLog(
+                                                "EVENT: 车机昼夜信号 nightMode=$night → 外观主题切到" +
+                                                    if (night) "黑夜" else "白天",
+                                            )
+                                        }
                                     }
 
                                     "requestSiri" -> {

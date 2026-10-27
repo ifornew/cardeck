@@ -12,6 +12,7 @@ import android.util.Log
 import android.view.Surface
 import io.github.shaonialife.cardeck.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
+import io.github.shaonialife.cardeck.launcher.settings.ThemePrefs
 import io.github.shaonialife.cardeck.media.NotificationAccess
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
 import io.github.shaonialife.cardeck.render.DualDisplayComposer
@@ -837,6 +838,7 @@ object VirtualLauncher {
         val pkg = appContextRef?.packageName ?: return false
         val ok = startOn(grid, "$pkg/.launcher.GridActivity")
         composer?.requestActiveApp(appHiDisplayId >= 0 && grid == appHiDisplayId)
+        launcherVisible = true
         // 桌面上的提示没有意义（顶层不是第三方应用），直接收起
         LetterboxHintController.clear()
         if (!ok) Log.w(TAG, "回桌面失败")
@@ -882,12 +884,63 @@ object VirtualLauncher {
     // 导航等应用状态不丢。
 
     /**
-     * dock 的 ⌂ 键：模式循环（仪表盘 ⇄ 桌面；应用/全屏地图 → 仪表盘）。
+     * 应用区当前显示的是启动器（桌面网格/仪表盘）还是某个全屏应用。
+     * home 键据此区分「应用里退回上一页」和「桌面上翻页」（2026-10-27 用户要求）。
+     */
+    @Volatile
+    private var launcherVisible = false
+
+    /** 桌面当前页码（0=仪表盘，>=1 图标网格页）：GridActivity 每次翻页回写。 */
+    @Volatile
+    private var desktopPage = 1
+
+    /** 桌面最近停留的**网格**页（>=1；停在仪表盘页时不更新）：退出仪表盘时的默认落点。 */
+    @Volatile
+    var desktopGridPage = 1
+        private set
+
+    /**
+     * GridActivity 回写桌面页码（仪表盘页 0 也记——打开应用可能发生在仪表盘上）。
+     */
+    fun rememberDesktopPage(page: Int) {
+        if (page < 0) return
+        desktopPage = page
+        if (page > 0) desktopGridPage = page
+    }
+
+    /** 打开应用之前用户所在的桌面页（0=仪表盘；-1=当前没有应用占用应用区）。 */
+    @Volatile
+    private var pageBeforeApp = -1
+
+    /** home 键从应用回桌面时要落的页码（>=1）；GridActivity 纠偏时消费一次，防止残留误用。 */
+    @Volatile
+    private var restorePage = -1
+
+    /** 取出并清空 home 键登记的落点（-1=未登记）。 */
+    fun consumeRestorePage(): Int = restorePage.also { restorePage = -1 }
+
+    /**
+     * dock 的 ⌂ 键：
+     *  - 有应用占着应用区：回到**打开应用之前那一页**（可能是仪表盘，也可能是第 N 个
+     *    网格页；2026-10-27 用户要求，不能固定回第 1 个网格页）；
+     *  - 桌面上：仪表盘 ⇄ 图标网格互相切换（在网格第 2 页按 ⌂ → 回仪表盘第一页）。
      * 注意必须先复位 mapFullscreen——路由闸门依赖它，漏复位会把桌面触摸
      * 继续送进已隐藏的地图屏（实测：桌面无法点击而日志注入成功的根因）。
      */
     fun onHomePressed() {
         when {
+            !launcherVisible -> {
+                if (mapFullscreen) setMapFullscreen(false)
+                val back = if (pageBeforeApp >= 0) pageBeforeApp else desktopPage
+                pageBeforeApp = -1
+                if (back == 0) {
+                    showDashboard()
+                } else {
+                    restorePage = back
+                    showDesktop()
+                }
+            }
+
             mapFullscreen -> {
                 setMapFullscreen(false)
                 showDashboard()
@@ -903,6 +956,7 @@ object VirtualLauncher {
         syncDashboard(true)
         goGrid()
         composer?.requestActiveApp(appHiDisplayId >= 0 && gridDisplayId == appHiDisplayId)
+        launcherVisible = true
         logSink?.invoke("LAUNCHER: 仪表盘模式（地图 tile + 音乐卡）")
     }
 
@@ -939,6 +993,8 @@ object VirtualLauncher {
     /** 回普通桌面：隐藏地图层并退出仪表盘，桌面恢复全宽图标网格（地图任务保留）。 */
     fun showDesktop() {
         syncDashboard(false)
+        // 模式没变化时 syncDashboard 不通知：home 键从应用回来仍需按登记页纠偏，这里补一次
+        notifyDashboard()
         goGrid()
         logSink?.invoke("LAUNCHER: 桌面模式（图标网格）")
     }
@@ -1105,6 +1161,9 @@ object VirtualLauncher {
             notifyRunningAppsChanged()
             appContextRef?.let {
                 LetterboxHintController.scheduleProbe(it, "地图启动", displayIdHint = mapDisplayId)
+                if (component.packageName == "com.autonavi.amapauto") {
+                    ThemePrefs.reassertAmapDayNight(it)
+                }
             }
         }
         return ok
@@ -1188,6 +1247,9 @@ object VirtualLauncher {
                 (result.ok && result.output.contains("Starting:", ignoreCase = true)) +
                 (if (!result.ok) " err=${result.output.take(120)}" else ""),
         )
+        if (component.packageName == "com.autonavi.amapauto") {
+            ThemePrefs.reassertAmapDayNight(ctx)
+        }
     }
 
     /**
@@ -1287,6 +1349,9 @@ object VirtualLauncher {
         if (ok) {
             synchronized(runningApps) { runningApps.add(component) }
             notifyRunningAppsChanged()
+            // 记下打开应用前用户所在的桌面页：home 键第一次按下回到这里（不被后续
+            // 退出仪表盘的纠偏覆盖，必须在 dashboardMode 改动之前取）
+            if (launcherVisible) pageBeforeApp = desktopPage
             // 仪表盘/全屏地图中打开普通应用：退出仪表盘并隐藏地图层，
             // 否则 SPLIT 带区继续画在应用上面（实测地图 tile 盖住打开的应用）
             if (dashboardMode || mapFullscreen) {
@@ -1298,6 +1363,8 @@ object VirtualLauncher {
             }
             // 合成器切到目标屏（超采样屏等其出帧再切；原生屏即时切换）
             composer?.requestActiveApp(targetDisplay == appHiDisplayId)
+            // 应用占住了应用区：记下来，home 键第一次按下回「打开应用前的桌面页」
+            launcherVisible = false
             // 应用已在运行、被系统按旧配置带回前台的情况：启动后探测一次是否仍
             // letterbox（提示卡只对「应用横屏」名单内的应用生效，其它应用不计）
             val ctx = appContextRef

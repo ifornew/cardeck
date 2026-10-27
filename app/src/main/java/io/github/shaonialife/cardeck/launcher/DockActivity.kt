@@ -213,8 +213,8 @@ class DockActivity : AppCompatActivity() {
      * （RenderEffect，API 31+；半径按 dock 物理像素，最大 40px——乘 designScale
      * 保证高分辨率车机上模糊观感与奥迪基准一致）。
      *
-     * 2026-10-26 CarPlay 化：暗幕从通栏色块改为**内缩的圆角面板**（XML 里留了
-     * 1.9dp 外边距），四周露出壁纸，形成 CarPlay dock 的「磨砂玻璃条」观感。
+     * 2026-10-26 CarPlay 化：暗幕改为圆角面板；2026-10-27 用户要求 dock 紧贴屏幕
+     * 左缘并与右侧内容区相接，面板改为**通栏直角**（XML 外边距 0）。
      */
     private fun applyDockPrefs() {
         val scrim = findViewById<View>(R.id.dockScrim) ?: return
@@ -225,7 +225,7 @@ class DockActivity : AppCompatActivity() {
         scrim.background =
             android.graphics.drawable.GradientDrawable().apply {
                 shape = android.graphics.drawable.GradientDrawable.RECTANGLE
-                cornerRadius = 12f * designScale
+                cornerRadius = 0f
                 setColor(
                     android.graphics.Color.argb(
                         alpha,
@@ -356,9 +356,10 @@ class DockActivity : AppCompatActivity() {
         container.removeAllViews()
         val density = resources.displayMetrics.density
         // dock 内宽 ≈ 37dp（侧栏 42dp 减去左右 padding；底栏高 42dp 减去上下 padding）。
-        // 对照原生 CarPlay：图标约占 dock 宽度/高度的 70%，即 30dp 图标 + 2dp 边距 = 34dp
-        // （圆角面板内缩后留下的内容宽度，2026-10-26）；图标之间留 6dp 间距。
-        val iconPx = (30 * density).toInt()
+        // 图标可视尺寸与左下角主页字形对齐：主页 16dp 矢量在「内容宽 - 2×3dp」的盒子里
+        // fitCenter 后可见字形约 27dp 宽，这里取同一数值；外围 2dp 内边距用于点击热区，
+        // 图标之间留 6dp 间距。
+        val iconPx = (27 * density).toInt()
         val pad = (2 * density).toInt()
         val gap = (6 * density).toInt()
         val apps = synchronized(VirtualLauncher.runningApps) { VirtualLauncher.runningApps.toList() }

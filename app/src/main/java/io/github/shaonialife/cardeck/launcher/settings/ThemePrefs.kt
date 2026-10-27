@@ -9,9 +9,8 @@ import io.github.shaonialife.cardeck.util.Bg
 /**
  * 车机外观主题：「自动 / 白天 / 黑夜」三档，默认自动。
  *
- * 自动档当前跟随**手机系统**的深浅色（AppCompat 的 FOLLOW_SYSTEM 即此语义）；
- * 车机侧的昼夜检测信号接入后，由 [carNightSignal] 覆盖系统判断——届时只需在
- * 收到车机 night mode 时调用 [setCarNightSignal]，其余逻辑不用改。
+ * 自动档优先跟随**车机**传来的昼夜信号（/command type=setNightMode，会话内有效），
+ * 没有信号时退回跟随**手机系统**的深浅色。信号入口是 [setCarNightSignal]。
  *
  * 主题通过 AppCompatDelegate 的全局 night mode 生效：车机侧布局/drawable 引用
  * `car_*` 颜色令牌（values = 白天，values-night = 黑夜），切换后相关 Activity
@@ -31,6 +30,22 @@ object ThemePrefs {
     /** 车机昼夜信号（true=夜间，false=白天，null=尚未收到）。 */
     @Volatile
     private var carNightSignal: Boolean? = null
+
+    /** 高德车机版昼夜广播协议（KEY_TYPE=10048，额外字段 0=自动/1=白天/2=黑夜）。 */
+    private const val AMAP_PKG = "com.autonavi.amapauto"
+    private const val AMAP_ACTION = "AUTONAVI_STANDARD_BROADCAST_RECV"
+    private const val AMAP_KEY_TYPE = 10048
+
+    /** 已下发过高德的昼夜档（null=从未下发，用于避免开机/无信号时无谓启动高德进程）。 */
+    @Volatile
+    private var amapSentMode: Int? = null
+
+    /**
+     * 车机信号覆盖**系统**深色前的 UiModeManager 档位（null=未覆盖）。
+     * 断开连接时据此还原，避免手机系统深色被车机信号「粘住」。
+     */
+    @Volatile
+    private var systemNightBeforeCar: Int? = null
 
     fun mode(context: Context): Int =
         context
@@ -70,19 +85,45 @@ object ThemePrefs {
     }
 
     /**
-     * 把显式的白天/黑夜同步到**手机系统**的深色开关（`cmd uimode night`）。
+     * 把当前昼夜同步到**手机系统**的深色开关（`cmd uimode night`）。
      *
      * 为什么需要它：高德车机版这类被镜像到虚拟屏的应用只读自己进程的
      * uiMode，而本应用的主题只改自己的 Resources/AppCompat，穿不过去；
      * Android 12 没有可用的 per-app 夜间模式（`cmd uimode` 无该子命令），
      * 唯一可靠通路是系统级切换。默认关闭，由用户在「外观主题」里显式开启。
-     * 自动档不写系统（自动本来就是跟随系统，写了会互相打架）。
+     *
+     * 写入范围：
+     *  - 显式「白天/黑夜」：按用户选择写；
+     *  - 「自动」：只有收到车机昼夜信号时才写（此时"自动"指跟随车机）；
+     *    没有信号时自动本就跟随手机系统，再写会互相打架。
      */
     fun applySystemNight(context: Context) {
-        if (!syncSystemNight(context)) return
+        if (!syncSystemNight(context)) {
+            // 用户关掉同步：把车机信号改过的系统档位还原
+            restoreSystemNightForCar(context)
+            return
+        }
         val mode = mode(context)
-        if (mode == AUTO) return
-        val want = if (mode == NIGHT) "yes" else "no"
+        val night =
+            when (mode) {
+                DAY -> false
+                NIGHT -> true
+                else -> {
+                    if (carNightSignal == null) return
+                    desiredNight(context)
+                }
+            }
+        if (mode == AUTO) {
+            // 记下覆盖前的档位：断开后还原（只在首次覆盖时取）
+            if (systemNightBeforeCar == null) {
+                systemNightBeforeCar =
+                    context.getSystemService(android.app.UiModeManager::class.java)?.nightMode
+            }
+        } else {
+            // 显式档由用户接管，不再替车机还原
+            systemNightBeforeCar = null
+        }
+        val want = if (night) "yes" else "no"
         Bg.run("system-night") {
             val result =
                 runCatching {
@@ -102,8 +143,41 @@ object ThemePrefs {
     }
 
     /**
-     * 车机昼夜检测信号接入点（预留）：传 null 表示信号丢失、退回跟随手机系统。
+     * 还原车机信号覆盖前的系统昼夜档位（断开连接 / 关闭同步时）。
+     * 只在确实由车机信号改过系统时执行，其余情况空操作。
+     */
+    private fun restoreSystemNightForCar(context: Context) {
+        val original = systemNightBeforeCar ?: return
+        systemNightBeforeCar = null
+        val arg =
+            when (original) {
+                android.app.UiModeManager.MODE_NIGHT_YES -> "yes"
+                android.app.UiModeManager.MODE_NIGHT_NO -> "no"
+                android.app.UiModeManager.MODE_NIGHT_CUSTOM -> "custom"
+                else -> "auto"
+            }
+        Bg.run("system-night-restore") {
+            val result =
+                runCatching {
+                    io.github.shaonialife.cardeck.shizuku.Shell.exec("cmd uimode night $arg", 5_000)
+                }.getOrNull()
+            io.github.shaonialife.cardeck.SessionController.appendLog(
+                "主题: 车机信号结束，系统深色还原 → $arg" +
+                    (
+                        if (result == null) {
+                            "（Shizuku 不可用）"
+                        } else {
+                            "（exit=${result.exitCode} ${result.output.trim().take(80)}）"
+                        }
+                    ),
+            )
+        }
+    }
+
+    /**
+     * 车机昼夜检测信号接入点：传 null 表示信号丢失、退回跟随手机系统。
      * 自动档下立即重新应用；白天/黑夜档不受影响（用户显式选择优先）。
+     * 开启「同步系统深色」时，自动档下本信号也会驱动手机系统深色（高德等镜像应用据此变色）。
      */
     fun setCarNightSignal(
         context: Context,
@@ -112,6 +186,74 @@ object ThemePrefs {
         if (carNightSignal == night) return
         carNightSignal = night
         apply(context)
+        if (night == null) {
+            restoreSystemNightForCar(context)
+        } else if (mode(context) == AUTO) {
+            applySystemNight(context)
+        }
+    }
+
+    /**
+     * 把当前昼夜**直接下发给高德车机版**（官方车机对接广播协议）。
+     *
+     * 为什么不能只切系统 uiMode：2026-10-27 实测，`cmd uimode night yes` 对虚拟屏上
+     * **正在运行**的高德车机版完全无效（前后截图逐字节相同）；只有重启进程才读到新配置，
+     * 而重启会中断导航。高德自己注册了标准广播接口，运行中即时生效。
+     *
+     * 协议：action=AUTONAVI_STANDARD_BROADCAST_RECV，KEY_TYPE=10048，
+     * EXTRA_DAY_NIGHT_MODE：0=自动、1=白天、2=黑夜。
+     */
+    private fun pushAmapDayNight(
+        context: Context,
+        force: Boolean = false,
+    ) {
+        val target =
+            when (mode(context)) {
+                DAY -> 1
+                NIGHT -> 2
+                // 自动档：优先车机昼夜信号；没有信号时跟随手机系统深色。
+                // 首次下发（force=false 且从未发过）不打扰高德，避免开机就拉起它的进程。
+                else ->
+                    when (carNightSignal) {
+                        true -> 2
+                        false -> 1
+                        null ->
+                            when {
+                                force -> if (desiredNight(context)) 2 else 1
+                                amapSentMode == null -> return
+                                else -> 0
+                            }
+                    }
+            }
+        if (!force && amapSentMode == target) return
+        amapSentMode = target
+        Bg.run("amap-daynight") {
+            val sent =
+                runCatching {
+                    context.sendBroadcast(
+                        android.content.Intent(AMAP_ACTION)
+                            .setPackage(AMAP_PKG)
+                            .putExtra("KEY_TYPE", AMAP_KEY_TYPE)
+                            .putExtra("EXTRA_DAY_NIGHT_MODE", target),
+                    )
+                    true
+                }.getOrElse { false }
+            io.github.shaonialife.cardeck.SessionController.appendLog(
+                "主题: 高德昼夜广播 → " +
+                    listOf("自动", "白天", "黑夜")[target] +
+                    if (sent) "" else "（发送失败：高德车机版未安装？）",
+            )
+        }
+    }
+
+    /**
+     * 高德刚（重新）启动时对齐一次当前昼夜：收到广播前启动的实例按它自己的设置渲染，
+     * 运行中又收不到系统 uiMode 变化，只能重发协议广播。
+     * 「自动」且没有车机信号时按手机系统深浅色下发，避免高德停在它自己的自动档。
+     */
+    fun reassertAmapDayNight(context: Context) {
+        amapSentMode = null
+        pushAmapDayNight(context, force = true)
     }
 
     /** 当前是否夜间（按已生效的资源配置判断——AppCompat 已把 night mode 落到 config）。 */
@@ -215,6 +357,8 @@ object ThemePrefs {
         // 默认壁纸选哪张由这里显式下发：与各调用方 Context 的 uiMode 解耦，
         // 避免主题切换时旧 Activity 用过期配置污染壁纸缓存（见 WallpaperStore.nightMode）
         WallpaperStore.setNight(desiredNight(context))
+        // 高德等镜像应用收不到系统 uiMode 变化，昼夜一律用高德自己的广播接口下发
+        pushAmapDayNight(context)
         if (mode(context) == AUTO && carNightSignal == null) {
             // 记下已落地的系统昼夜：避免下一次无关的配置回调被当成「系统昼夜变了」
             lastBroadcastNight = desiredNight(context)
