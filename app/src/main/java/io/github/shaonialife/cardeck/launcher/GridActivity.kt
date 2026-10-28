@@ -546,6 +546,11 @@ class GridActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         ThemePrefs.applyToActivity(this)
         ThemePrefs.addNightListener(themeNightListener)
+        // 锁屏不接管虚拟屏：手机锁屏后系统会把 Keyguard 铺到虚拟屏上，应用屏整块
+        // 变成锁屏界面（2026-10-29 真机实测：锁屏后 CarPlayApp 显示「00:59 10月29日」）。
+        // 与 CarDroid 一致：窗口允许显示在锁屏之上（CarDroid 仅在 displayId>0 时设置；
+        // 此处 onCreate 阶段 display 可能尚未解析，故先无条件设置，onResume 再按实际屏校正）。
+        setShowWhenLocked(true)
         DockPrefs.syncRatio(this) // 冷启动时把持久化的 splitRatio 加载到全局变量（SPLIT_MAP_WIDTH_RATIO）
         setContentView(R.layout.activity_grid)
         vsyncKeepAlive.install()
@@ -704,6 +709,17 @@ class GridActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 仅虚拟屏需要「跨锁屏显示」；若本页在手机主屏（displayId=0）则恢复默认，
+        // 避免桌面在锁屏上盖住锁屏界面。
+        // 注意：Activity.getDisplay() 在虚拟屏上会返回 0（Activity 上下文的 displayId
+        // 恒为主屏），必须用 decorView 实际挂载的 Display 判断。
+        val virtual = (window.decorView.display?.displayId ?: 0) > 0
+        setShowWhenLocked(virtual)
+        if (virtual) {
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED)
+        } else {
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED)
+        }
         // 也覆盖从设置页返回：勾选变化即时反映
         reload()
         refreshWallpaperIfChanged()

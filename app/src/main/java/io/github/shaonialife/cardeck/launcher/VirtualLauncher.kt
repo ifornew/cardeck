@@ -618,6 +618,21 @@ object VirtualLauncher {
             } else {
                 // 回退：应用侧 PUBLIC 屏（应用内跳转任务会逃逸到手机主屏，尽量可用的降级形态）
                 val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+                // 锁屏接管公有虚拟屏（2026-10-29 EMUI 14.2 实测，应用层无解，保留记录）：
+                // 手机锁屏后 SystemUI 会在每个公有虚拟屏上再铺一份自己的 KEYGUARD_DIALOG
+                // （`dumpsys window displays`：475~478 全部 isKeyguardShowing=true；锁屏时钟
+                // 窗口 Type=KEYGUARD_DIALOG、mBaseLayer=211000 压在 GridActivity 21000 之上）。
+                //  - 窗口级 SHOW_WHEN_LOCKED 被 ROM 忽略（标志已落到 WMS 仍被盖住）；
+                //  - 屏级 CAN_SHOW_WITH_INSECURE_KEYGUARD(1<<5) 不可用：AOSP 禁止与 PUBLIC
+                //    共存，抛 IllegalArgumentException "Public display must not be marked as
+                //    SHOW_WHEN_LOCKED_INSECURE"（实测崩在合成线程）；私有屏又会拒第三方
+                //    应用/输入法窗口（ADD_INVALID_DISPLAY）。
+                //  - CarDroid(minSdk 33) 依赖 Android 13+ CDM VirtualDevice 独立 display group，
+                //    A12/EMUI 无此能力；本机唯一缓解手段是系统侧 `wm dismiss-keyguard`
+                //    （仅无密码凭据锁屏有效，且会点亮手机屏幕）。
+                val fallbackFlags =
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
+                        DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
                 dockDisplay =
                     dm.createVirtualDisplay(
                         "CarPlayDock",
@@ -625,8 +640,7 @@ object VirtualLauncher {
                         dockHeightPx,
                         densityDpi,
                         dockSurface,
-                        DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
-                            DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
+                        fallbackFlags,
                         null,
                         null,
                     )
@@ -637,8 +651,7 @@ object VirtualLauncher {
                         appHeightPx,
                         appNativeDensity,
                         appSurface,
-                        DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
-                            DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
+                        fallbackFlags,
                         null,
                         null,
                     )
@@ -650,8 +663,7 @@ object VirtualLauncher {
                             appHiHeight,
                             appHiDensity,
                             appHiSurface,
-                            DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
-                                DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
+                            fallbackFlags,
                             null,
                             null,
                         )
@@ -671,8 +683,7 @@ object VirtualLauncher {
                             appHeightPx,
                             MAP_DISPLAY_DPI,
                             mapSurface,
-                            DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
-                                DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
+                            fallbackFlags,
                             null,
                             null,
                         )

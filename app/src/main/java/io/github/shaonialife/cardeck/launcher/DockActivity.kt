@@ -124,6 +124,8 @@ class DockActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         ThemePrefs.applyToActivity(this)
         ThemePrefs.addNightListener(themeNightListener)
+        // 锁屏不接管 dock 虚拟屏（同 GridActivity：锁屏后 Keyguard 会铺满虚拟屏）。
+        setShowWhenLocked(true)
         val dm = resources.displayMetrics
         barForm = dm.widthPixels > dm.heightPixels
         setContentView(if (barForm) R.layout.activity_dock_bar else R.layout.activity_dock_sidebar)
@@ -179,6 +181,9 @@ class DockActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 虚拟屏（displayId>0）才跨锁屏显示（Activity.getDisplay() 在此恒为 0，
+        // 用 decorView 实际挂载的 Display 判断）。
+        setShowWhenLocked((window.decorView.display?.displayId ?: 0) > 0)
         refresh()
         updateSignal()
     }
