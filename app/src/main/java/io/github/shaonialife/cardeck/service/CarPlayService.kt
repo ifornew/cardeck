@@ -153,9 +153,29 @@ class CarPlayService : Service() {
         @Volatile
         var pendingProjectionResult: Pair<Int, Intent>? = null
 
-        fun start(context: Context) {
-            context.startForegroundService(Intent(context, CarPlayService::class.java))
-        }
+        /**
+         * 启动前台保活服务。
+         *
+         * Android 12+ 在后台（无可见 Activity）调 `startForegroundService` 会抛
+         * `ForegroundServiceStartNotAllowedException`——常驻模式由 ACL 接收器唤醒时
+         * 正好命中这条限制。这里必须把失败暴露出去，否则表现为「静默不连接」，
+         * 日志里什么都看不到（对照 CarDroid 的 `resident_start_pending`）。
+         *
+         * @return true = 启动成功；false = 被系统策略拦截
+         */
+        fun start(context: Context): Boolean =
+            try {
+                context.startForegroundService(Intent(context, CarPlayService::class.java))
+                true
+            } catch (error: Exception) {
+                val blocked = error.javaClass.simpleName
+                android.util.Log.w("CarPlayService", "startForegroundService 被拦截: $blocked")
+                DebugFileLog.append(
+                    context,
+                    "SVC: 前台服务启动被系统拦截（$blocked）——后台无可见界面时不允许拉起，请打开 App 后重试",
+                )
+                false
+            }
 
         fun stop(context: Context) {
             context.stopService(Intent(context, CarPlayService::class.java))

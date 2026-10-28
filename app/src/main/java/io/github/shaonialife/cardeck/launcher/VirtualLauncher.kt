@@ -47,10 +47,11 @@ object VirtualLauncher {
      * 密度基准 420dpi（↔ 奥迪设计画布 1160×540），由 SessionController 按画布短边
      * 等比下发——高分辨率车机下 dock 条与文字/图标同步放大，占画布短边恒定 20.4%
      * （= 设计 110/540；2026-10-17 修复「高分辨率下 dock 显小」，2026-10-25 用户
-     * 要求 dock 再窄一点：48dp→42dp）。dock 内图标/首页按钮尺寸见 DockActivity 与
-     * activity_dock_sidebar/bar.xml，须同步收小，否则窄条下会被裁。
+     * 要求 dock 再窄一点：48dp→42dp，2026-10-28 再收到「太宽」：42dp→36dp→32dp）。
+     * dock 内图标/首页按钮尺寸见 DockActivity 与 activity_dock_sidebar/bar.xml，
+     * 须同步收小，否则窄条下会被裁。
      */
-    const val DOCK_WIDTH_DP = 42
+    const val DOCK_WIDTH_DP = 32
 
     /**
      * 竖屏锁定应用的 letterbox 宽高比（宽/高，会话建立时经 Shizuku 写入系统）。
@@ -716,6 +717,9 @@ object VirtualLauncher {
             )
             // 组件名取自运行时包名（不要硬编码）：改 applicationId 后自动跟随
             val selfPkg = context.packageName
+            // 新会话默认落在第一屏（仪表盘）：先置位，GridActivity 首帧消费后落到页 0
+            landOnDashboard = true
+            landOnDashboardAt = android.os.SystemClock.elapsedRealtime()
             val dockOk = startOn(dockDisplayId, "$selfPkg/.launcher.DockActivity")
             gridDisplayId = if (appHiDisplayId >= 0) appHiDisplayId else appDisplayId
             val gridOk = startOn(gridDisplayId, "$selfPkg/.launcher.GridActivity")
@@ -918,6 +922,29 @@ object VirtualLauncher {
 
     /** 取出并清空 home 键登记的落点（-1=未登记）。 */
     fun consumeRestorePage(): Int = restorePage.also { restorePage = -1 }
+
+    /**
+     * 新会话首次进入桌面时落在第一屏（仪表盘页 0）。
+     *
+     * 会话建立时置位，GridActivity 首帧消费一次后清除：连上车机就看到地图 tile 与
+     * 音乐卡，而不是沿用上一会话停留的某个图标网格页（2026-10-28 用户要求）。
+     * 只影响「新会话的第一次落点」，之后翻页/⌂ 键仍按原有规则。
+     */
+    @Volatile
+    private var landOnDashboard = false
+
+    /** 置位时刻（elapsedRealtime）：只在会话建立后的短时间内有效，避免标记残留。 */
+    private var landOnDashboardAt = 0L
+
+    /** 新会话落点标记的有效期：超过这个时间的遗留标记一律作废。 */
+    private const val LAND_ON_DASHBOARD_TTL_MS = 30_000L
+
+    /** 取出并清空「新会话落在第一屏」标记（false=本次无需纠偏）。 */
+    fun consumeLandOnDashboard(): Boolean {
+        if (!landOnDashboard) return false
+        landOnDashboard = false
+        return android.os.SystemClock.elapsedRealtime() - landOnDashboardAt <= LAND_ON_DASHBOARD_TTL_MS
+    }
 
     /**
      * dock 的 ⌂ 键：

@@ -12,6 +12,7 @@ import io.github.shaonialife.cardeck.bt.BtProfiles
 import io.github.shaonialife.cardeck.bt.BtSessionGate
 import io.github.shaonialife.cardeck.bt.Iap2BluetoothClient
 import io.github.shaonialife.cardeck.bt.Iap2BluetoothServer
+import io.github.shaonialife.cardeck.bt.ResidentBackoff
 import io.github.shaonialife.cardeck.bt.TargetDevicePrefs
 import io.github.shaonialife.cardeck.capture.HiddenDisplaySource
 import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
@@ -227,6 +228,23 @@ object SessionController {
     private var rearmToken = 0
     private var rearmPending = false
     private val rearmHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    // ---- Resident 常驻模式（对照 CarDroid J5/O5）----
+
+    /** 阶梯退避器：异常断链后按 0s→5s→30s→2min→10min→30min 递增静默。 */
+    private val residentBackoff = ResidentBackoff()
+
+    /** 用户是否开启了「常驻连接」（持久化偏好；开启后 App 启动即自动进入等待车机回连）。 */
+    @Volatile
+    var residentEnabled: Boolean = false
+        private set
+
+    /** 常驻模式下的周期健康巡检（BT 监听/ctrl 广播是否还活着）。 */
+    private val patrolHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var patrolRunning = false
+
+    /** 巡检间隔：与 CarDroid resident_standby_report 同量级。 */
+    private const val PATROL_INTERVAL_MS = 15_000L
 
     /** 异常断链后静默多久再重新发布（模拟用户「取消 → 启动」之间的空档）。 */
     private const val ABNORMAL_REARM_DELAY_MS = 3_000L
@@ -446,6 +464,9 @@ object SessionController {
         connectionWanted = true
         cancelPendingRearm()
         connectCancelled = false
+        // 声音选择必须持久化并在此恢复：常驻模式/ACL 自动唤醒**不经过**「启动连接」
+        // 弹窗，若只依赖弹窗赋值，自动连接永远是「仅推视频」（2026-10-28 实测）。
+        audioEnabledForSession = loadAudioPref(context.applicationContext)
         phaseHint = "蓝牙就绪，等待车机回连…"
         when (
             ShizukuGate
@@ -466,8 +487,15 @@ object SessionController {
             ShizukuGate.State.NOT_INSTALLED ->
                 appendLog("SHIZUKU: 未安装（隐形屏模式需要）")
         }
-        CarPlayService
-            .start(context)
+        if (!CarPlayService.start(context)) {
+            // 后台被策略拦截：常驻模式经 ACL 唤醒时最常命中。必须显式告知，
+            // 否则用户看到的是「怎么点都没反应、日志也没有内容」。
+            phaseHint = "后台启动受限——请打开 App 后重试"
+            appendLog(
+                "RESIDENT: 前台保活服务被系统拦截——Android 12+ 不允许后台无界面拉起服务；" +
+                    "请打开 App，常驻模式会自动恢复",
+            )
+        }
         // 能力发布先于连接（catplay 的做法：CarPlayCtrlServer 在会话一开始就常驻广播
         // `_carplay-ctrl._tcp`，之后每 1s force_announce，收到车机邀请才建 AirPlay）。
         // 我们此前要等 0x5703 才注册，导致「车机发现手机」这一步总落在热点绑定之后，
@@ -476,6 +504,8 @@ object SessionController {
         // 兜底路径：主动连车机（SDP …caff 配件服务，奥迪 MIB3 实测）——宽限超时才启用，
         // 故必须先开监听，保证车机回连时服务端已在等待。
         armLinks()
+        // 常驻模式：连接启动即开始周期巡检（进程重建后自动启动路径也要覆盖）
+        if (residentEnabled) startPatrol()
         // 诊断（奥迪实测：手机与车机「蓝牙已连接」时车机不开放 CarPlay）：
         // 连之前把目标设备的蓝牙配置文件状态打出来，失败时一眼看出是不是这个原因。
         Bg.run("bt-profile-diag") {
@@ -490,6 +520,16 @@ object SessionController {
 
     /** 「断开连接」（可在任意 Activity 实例上调用——操作的是真管线对象）。 */
     fun disconnect(context: Context) {
+        // 调用方定案：断开会停掉整条链路且不可自动恢复，历史上出现过「无用户操作
+        // 却走到这里」的日志（连接Wanted 被置 false 后巡检再也重挂不了），
+        // 不留调用栈就只能靠猜。
+        val caller =
+            Throwable()
+                .stackTrace
+                .drop(1)
+                .firstOrNull()
+                ?.let { "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}" }
+        appendLog("SESSION: 断开调用来源→$caller")
         connectionWanted = false
         cancelPendingRearm()
         val hadProjection = CarPlayService.mediaProjection != null
@@ -517,6 +557,125 @@ object SessionController {
             appendLog("已手动断开并停止保活服务（常亮已恢复）")
         }
     }
+
+    // ---- Resident 常驻模式公开 API ----
+
+    /**
+     * 开启常驻连接（对照 CarDroid resident 模式）：
+     * App 启动即自动进入「等待车机回连」状态，无需用户点「启动连接」。
+     * 开启状态持久化到偏好；异常断链按阶梯退避自动重挂。
+     */
+    fun startResident(context: Context) {
+        if (residentEnabled) {
+            // 已从偏好恢复（如 ACL 接收器触发）：幂等补一次启动与巡检
+            startConnection(context)
+            return
+        }
+        residentEnabled = true
+        saveResidentPref(context, true)
+        appendLog(
+            "RESIDENT: 常驻模式已开启（首次配对新车机时，需在系统蓝牙设置里打开「对附近设备可见」；" +
+                "已配对车机可直接回连，无需此步）",
+        )
+        // 立即进入连接等待（幂等，已有会话时不会双开；内部会自动启动巡检）
+        startConnection(context)
+    }
+
+    /** 关闭常驻模式：停止巡检，断开当前连接。 */
+    fun stopResident(context: Context) {
+        if (!residentEnabled) return
+        residentEnabled = false
+        saveResidentPref(context, false)
+        stopPatrol()
+        disconnect(context)
+        appendLog("RESIDENT: 常驻模式已关闭")
+    }
+
+    /**
+     * 判断当前是否应自动启动连接（App 启动时由 MainActivity 调用）。
+     * 返回 true 表示用户之前开启了常驻模式。
+     */
+    fun shouldAutoStart(context: Context): Boolean {
+        if (!residentEnabled) {
+            // 从偏好恢复（进程重建场景）
+            residentEnabled = loadResidentPref(context)
+        }
+        return residentEnabled
+    }
+
+    /** 周期巡检：确认 BT 监听与 ctrl 广播仍存活，发现异常自动重挂。 */
+    private fun startPatrol() {
+        if (patrolRunning) return
+        patrolRunning = true
+        patrolHandler.postDelayed(
+            object : Runnable {
+                override fun run() {
+                    if (!residentEnabled || !patrolRunning) return
+                    patrolTick()
+                    patrolHandler.postDelayed(this, PATROL_INTERVAL_MS)
+                }
+            },
+            PATROL_INTERVAL_MS,
+        )
+    }
+
+    private fun stopPatrol() {
+        patrolRunning = false
+        patrolHandler.removeCallbacksAndMessages(null)
+    }
+
+    /** 单次巡检：会话不活跃但 resident 开着 → 检查链路是否需要重挂。 */
+    private fun patrolTick() {
+        // 推流中：一切正常
+        if (videoSender?.isRunning == true) return
+        // BT 监听停了但 resident 开着 → 静默重挂
+        val btAlive = bluetoothServer?.isRunning == true || bluetoothClient?.isRunning == true
+        val ctrlAlive = (ctrlAdvertiser?.port ?: -1) > 0
+        if (!btAlive || !ctrlAlive) {
+            appendLog(
+                "RESIDENT: 巡检发现链路异常（bt=$btAlive ctrl=$ctrlAlive " +
+                    "wanted=$connectionWanted cancelled=$connectCancelled pending=$rearmPending）——静默重挂",
+            )
+            scheduleAbnormalRearm("巡检发现链路异常")
+        }
+    }
+
+    private fun saveResidentPref(
+        context: Context,
+        enabled: Boolean,
+    ) {
+        context.applicationContext
+            .getSharedPreferences("resident_mode", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("enabled", enabled)
+            .apply()
+    }
+
+    private fun loadResidentPref(context: Context): Boolean =
+        context.applicationContext
+            .getSharedPreferences("resident_mode", Context.MODE_PRIVATE)
+            .getBoolean("enabled", false)
+
+    /**
+     * 「启动连接」弹窗的声音选择，持久化后供常驻/自动唤醒复用。
+     * 默认 **true**：新用户期望「连上就有声音」，否则会误判为音频推送故障。
+     */
+    fun setAudioEnabled(
+        context: Context,
+        enabled: Boolean,
+    ) {
+        audioEnabledForSession = enabled
+        context.applicationContext
+            .getSharedPreferences("resident_mode", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("audio", enabled)
+            .apply()
+    }
+
+    private fun loadAudioPref(context: Context): Boolean =
+        context.applicationContext
+            .getSharedPreferences("resident_mode", Context.MODE_PRIVATE)
+            .getBoolean("audio", true)
 
     /**
      * 发布能力 + 开监听（启动连接与「异常断链后重新发布」共用）。
@@ -550,9 +709,27 @@ object SessionController {
                 rearmPending = true
                 rearmToken
             }
+        val delayMs = residentBackoff.nextDelayMs()
+        val step = residentBackoff.currentStep
+        if (residentBackoff.isExhausted) {
+            // 必须清掉 pending：否则后续巡检的调用会在 synchronized 里静默返回，
+            // 表现为「每 15s 打一行正在重挂、实际什么都没做」（常驻模式永久卡死）。
+            synchronized(rearmLock) { rearmPending = false }
+            appendLog(
+                "LINK: 异常断链（$reason）——已达最大重试次数，等待用户手动操作",
+            )
+            phaseHint = "连接多次失败——请手动重试"
+            return
+        }
+        val delayText =
+            when {
+                delayMs == 0L -> "立即"
+                delayMs < 60_000L -> "${delayMs / 1000}s"
+                else -> "${delayMs / 60_000}min"
+            }
         appendLog(
             "LINK: 异常断链（$reason）——完整收尾（停 ctrl 广播/释放 WiFi/BT 监听），" +
-                "${ABNORMAL_REARM_DELAY_MS / 1000}s 后重新发布",
+                "退避阶梯[$step] ${delayText}后重新发布",
         )
         phaseHint = "网络异常断开——正在重置链路…"
         Bg.run("link-teardown") {
@@ -566,7 +743,7 @@ object SessionController {
             wifiConnector?.release()
             boundCarSsid = null
         }
-        rearmHandler.postDelayed({ rearmNow(token) }, ABNORMAL_REARM_DELAY_MS)
+        rearmHandler.postDelayed({ rearmNow(token) }, delayMs)
     }
 
     private fun rearmNow(token: Int) {
@@ -640,6 +817,10 @@ object SessionController {
             return
         }
         if (audioSender?.isRunning == true) return
+        // 走到这里说明用户刚为「声音」补授了投屏权限：本次会话必须放行音频，
+        // 否则 startAudioChannel 会因 audioEnabledForSession=false 直接拒绝，
+        // 表现为「补启音频通道」日志之后紧跟着「本次连接未开启声音」（2026-10-28 实测）。
+        setAudioEnabled(context, true)
         appendLog("MODE: 会话进行中，动态补启音频通道…")
         startAudioChannel(context, client, secret, currentAudioHost)
     }
@@ -2355,6 +2536,9 @@ object SessionController {
                                 //   屏幕 SETUP → 连数据端口 → RECORD → 起编码器（出帧）→ 音频 SETUP
                                 // 音频 SETUP 失败只丢声音，视频会话保持。
                                 client.record()
+                                // 会话建立成功：重置退避阶梯，下次异常断链从头开始
+                                residentBackoff.reset()
+                                appendLog("LINK: 会话建立——退避阶梯已重置")
                                 if (host != null) {
                                     val videoW = pendingVideoW
                                     val videoH = pendingVideoH

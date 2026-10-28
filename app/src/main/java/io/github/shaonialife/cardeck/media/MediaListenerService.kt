@@ -102,7 +102,32 @@ class MediaListenerService : NotificationListenerService() {
             Thread(r, "media-art").apply { isDaemon = true }
         }
 
+    /**
+     * 复用的控制器实例。
+     *
+     * **必须复用**：`MediaController.getMetadata()` 的值是由框架回调**异步回填**的，
+     * 刚 `getActiveSessions()` 出来的实例立刻读 metadata 会拿到 null。此前 refresh()
+     * 每秒重新查询并把新实例丢掉，于是「有时有歌名、有时 ? - ?」，卡片还会因为
+     * title==null 而误报「无法读取播放信息」（2026-10-28 真机实测：dumpsys 里
+     * metadata 明明是 `Trust Life — Lni Z`，我们读到的却是 null）。
+     */
+    private var controllers: List<android.media.session.MediaController> = emptyList()
+
+    /** metadata 持续为 null 的起点（用于判断控制器实例是否已过期）。 */
+    private var nullSinceMs = 0L
+
     private fun update(controllers: List<android.media.session.MediaController>) {
+        // 只有会话集合变化才换实例；包名相同就沿用旧实例（metadata 已回填）
+        val sameSet =
+            controllers.map { it.packageName }.sorted() == this.controllers.map { it.packageName }.sorted()
+        if (!sameSet || this.controllers.isEmpty()) {
+            this.controllers = controllers
+        }
+        registerCallbacks()
+        refresh()
+    }
+
+    private fun registerCallbacks() {
         controllers.forEach { controller ->
             if (watched.add(controller.sessionToken)) {
                 controller.registerCallback(
@@ -119,21 +144,46 @@ class MediaListenerService : NotificationListenerService() {
                 )
             }
         }
-        refresh()
     }
 
     /** 从活跃会话提取正在播放态：优先 PLAYING 的会话，否则保留第一个有元数据的。 */
     private fun refresh() {
-        val controllers =
-            try {
-                manager.getActiveSessions(componentName(this))
-            } catch (_: SecurityException) {
-                emptyList()
-            }
-        val picked =
+        if (controllers.isEmpty()) {
+            controllers =
+                try {
+                    manager.getActiveSessions(componentName(this))
+                } catch (_: SecurityException) {
+                    emptyList()
+                }
+            registerCallbacks()
+        }
+        var picked =
             controllers.firstOrNull {
                 it.playbackState?.state == PlaybackState.STATE_PLAYING
             } ?: controllers.firstOrNull { it.metadata != null }
+        // 兜底：会话重启会让旧实例永久失效（metadata 恒 null）。
+        // 连续 2s 读不到就强制重建一次实例表，避免卡片长期停在「未在播放」。
+        if (picked != null && picked.metadata == null && picked.playbackState != null) {
+            val nowMs = android.os.SystemClock.elapsedRealtime()
+            if (nullSinceMs == 0L) {
+                nullSinceMs = nowMs
+            } else if (nowMs - nullSinceMs > 2_000L) {
+                nullSinceMs = 0L
+                controllers =
+                    try {
+                        manager.getActiveSessions(componentName(this))
+                    } catch (_: SecurityException) {
+                        emptyList()
+                    }
+                registerCallbacks()
+                picked =
+                    controllers.firstOrNull {
+                        it.playbackState?.state == PlaybackState.STATE_PLAYING
+                    } ?: controllers.firstOrNull { it.metadata != null }
+            }
+        } else {
+            nullSinceMs = 0L
+        }
         val now =
             picked?.let { controller ->
                 val meta = controller.metadata

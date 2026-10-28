@@ -164,6 +164,15 @@ class Iap2SenderSession(
         /** 挑战档位（长度, 首次试探窗口）：顺序与窗口由 DiPlay/Audi 双端实测决定。 */
         private val MFI_ATTEMPTS = listOf(32 to 3_000L, 20 to 6_000L, 16 to 3_000L)
 
+        /**
+         * 认证硬超时（对照 CarDroid「配件认证超过 15 秒，本轮结束」）。
+         *
+         * 证书与挑战**各自**给 15s 预算：车机装死时不能靠全局 60s 超时兜底，
+         * 否则用户看到的是长时间无响应。两段合计最坏 30s，仍在可接受范围；
+         * 挑战段内部本就按档位分窗（3s/6s/3s），正常车机远早于此。
+         */
+        const val AUTH_TIMEOUT_MS = 15_000L
+
         /** 真车系接收端特征（0x1D01 name/model/manufacturer 子串，小写比对）。 */
         private val LEGACY_RECEIVER_MARKERS = listOf("audi", "delphi", "mib", "harman", "porsche")
     }
@@ -203,7 +212,11 @@ class Iap2SenderSession(
             log("iap2 识别为真车系（$identityText）——MFi 首选 20B（真 iPhone 实录长度；32B 对真车处置不稳定）")
         }
         send(Iap2MessageIds.MFI_REQUEST_CERTIFICATE)
-        val certificate = expect(Iap2MessageIds.MFI_CERTIFICATE, deadline)
+        // 认证硬超时（对照 CarDroid）：车机不回 0xAA01 时不再等满全局 60s。
+        val certificate = expect(
+            Iap2MessageIds.MFI_CERTIFICATE,
+            minOf(deadline, System.nanoTime() + AUTH_TIMEOUT_MS * 1_000_000L),
+        )
         log("iap2 rx=0xaa01 certificate bytes=${certificate.body.size}（跳过校验）")
         // 挑战长度按接收端身份选择（2026-10-11 奥迪字节级实测修正）：
         //  - 真车系（Audi/Delphi MIB 等）：**20B 首试**。真 iPhone 实录（carplay-wifi-extractor
@@ -212,7 +225,11 @@ class Iap2SenderSession(
         //    32B→20B 的会话全部卡死，20B→（记忆命中）的会话全部秒通。
         //  - 测试台 DiPlay（Carlinkit AuthV3 EC 身份）：**只接受精确 32B**，长度不符直接断链。
         // 全部无应答也不中止——我们不校验签名（0xAA05 自报），由 0x5702 是否应答判定放行。
-        runMfiChallenge(deadline, prefer20First = legacyCar, receiverKey = identityText)
+        runMfiChallenge(
+            minOf(deadline, System.nanoTime() + AUTH_TIMEOUT_MS * 1_000_000L),
+            prefer20First = legacyCar,
+            receiverKey = identityText,
+        )
         send(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
         log("iap2 tx=0xaa05 authentication-succeeded（自报）")
 

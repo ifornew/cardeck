@@ -89,6 +89,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var audioDesc: TextView
     private lateinit var btnAudio: TextView
     private lateinit var switchAlwaysOn: androidx.appcompat.widget.SwitchCompat
+    private lateinit var switchResident: androidx.appcompat.widget.SwitchCompat
     private lateinit var advBody: View
     private lateinit var advChevron: ImageView
     private lateinit var shellStateText: TextView
@@ -496,7 +497,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun beginWithAudio(enabled: Boolean) {
-        SessionController.audioEnabledForSession = enabled
+        // 持久化：常驻/ACL 自动唤醒不走这个弹窗，必须记住本次选择
+        SessionController.setAudioEnabled(this, enabled)
         // 声音只剩一个模式：通路协商（AAC-LC 优先，不行自动退 PCM）在会话内自动完成，
         // 不再有「兼容档」这种人工分支。
         SessionController.audioPreferCompat = false
@@ -582,6 +584,7 @@ class MainActivity : AppCompatActivity() {
         audioDesc = findViewById(R.id.audioDesc)
         btnAudio = findViewById(R.id.btnAudio)
         switchAlwaysOn = findViewById(R.id.switchAlwaysOn)
+        switchResident = findViewById(R.id.switchResident)
         advBody = findViewById(R.id.advBody)
         advChevron = findViewById(R.id.advChevron)
         shellStateText = findViewById(R.id.shellStateText)
@@ -796,6 +799,30 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             log("MODE: 常亮+暗幕 ${if (checked) "开启" else "关闭"}")
+        }
+
+        // ---- 常驻连接（对照 CarDroid resident 模式：App 启动即等车机回连，断链自动重挂）----
+        switchResident.isChecked = SessionController.shouldAutoStart(this)
+        switchResident.setOnCheckedChangeListener { _, checked ->
+            if (checked) {
+                // 与手动启动同一前置门槛：Shizuku 就绪才允许开（隐形屏依赖）
+                val gate = ShizukuGate.state(this)
+                if (gate != ShizukuGate.State.READY) {
+                    switchResident.isChecked = false
+                    promptShizukuNotReady(gate)
+                    return@setOnCheckedChangeListener
+                }
+                SessionController.startResident(this)
+                log("MODE: 常驻连接开启——即进入等待车机回连，异常断链按阶梯退避自动重挂")
+            } else {
+                SessionController.stopResident(this)
+                log("MODE: 常驻连接关闭")
+            }
+        }
+        // 已开启常驻：启动即自动进入连接等待（等价用户点「启动连接」）
+        if (SessionController.shouldAutoStart(this) && !SessionController.isSessionRunning()) {
+            log("MODE: 常驻连接已开启——自动启动连接等待")
+            ensureShizukuReady { ensureBluetoothReady { SessionController.startConnection(this) } }
         }
 
         // ---- 英雄卡主操作 ----
@@ -1464,7 +1491,10 @@ class MainActivity : AppCompatActivity() {
                 .toSet()
         scannedTargets.clear()
         scannedList.removeAllViews()
-        updatePickerStatus("正在扫描附近的蓝牙设备…")
+        // 首次配对引导：普通应用无法把本机置为「可发现」（setScanMode 需系统级
+        // BLUETOOTH_PRIVILEGED，华为/AOSP 均拒绝），只能由用户手动打开可见窗口。
+        // 已配对车机不受影响——它可直接发起 ACL 回连，不需要发现流程。
+        updatePickerStatus("正在扫描…若一直找不到新车机：请先在系统蓝牙设置打开「对附近设备可见」")
         stopTargetScan()
         val receiver =
             object : BroadcastReceiver() {

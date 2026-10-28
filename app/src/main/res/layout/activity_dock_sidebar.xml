@@ -50,9 +50,12 @@
         android:includeFontPadding="false" />
 
     <!-- CarPlay 状态行：信号格 + 电池图标（原生不显示百分比：只有图标）。
-         字形单色跟随主题；充电时电池变 iOS 绿并在电池内部显示白色闪电。 -->
+         字形单色跟随主题；充电时电池变 iOS 绿并在电池内部显示白色闪电。
+         宽度 wrap_content：DockActivity 按「时钟文字宽度」等比缩放本行
+         （用户要求信号+电池总长与时间一致，2026-10-28）。 -->
     <LinearLayout
-        android:layout_width="match_parent"
+        android:id="@+id/dockStatus"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="2.29dp"
         android:gravity="center"
@@ -88,18 +91,6 @@
                 android:layout_height="5.33dp"
                 android:background="@drawable/bg_signal_bar" />
         </LinearLayout>
-
-        <!-- Wi-Fi（连着车机热点时显示，对应原生 CarPlay 状态栏的 Wi-Fi 图标） -->
-        <ImageView
-            android:id="@+id/dockWifi"
-            android:layout_width="3.81dp"
-            android:layout_height="2.86dp"
-            android:layout_marginStart="2.29dp"
-            android:importantForAccessibility="no"
-            android:scaleType="fitCenter"
-            android:src="@drawable/ic_wifi"
-            android:tint="@color/car_text_strong"
-            android:visibility="gone" />
 
         <!-- 电池：自绘字形（描边/填充/正极/充电闪电，见 BatteryGlyphView） -->
         <io.github.shaonialife.cardeck.launcher.BatteryGlyphView

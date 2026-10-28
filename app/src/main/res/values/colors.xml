@@ -59,10 +59,10 @@
     <!-- 单色图标（dock/媒体/导航/返回）：白天深色、夜间白色，见 values-night -->
     <color name="car_icon">#FF1C1C1E</color>
     <!-- 翻页圆点 / 旋钮选中框：压在全流壁纸上，随昼夜反转。
-         白天壁纸是浅米/浅蓝，圆点太透会“看不见”（2026-10-25 实车两次反馈）：
-         未选中提到 80% 黑，选中纯黑，保证浅底/杂色底上都清晰。 -->
-    <color name="car_page_dot">#CC000000</color>
-    <color name="car_page_dot_sel">#FF000000</color>
+         白天壁纸是浅米/浅蓝：未选中 40% 黑，当前页用近黑（不用彩色——2026-10-28
+         实车反馈「蓝色不合适」）。形状保持等大圆点。 -->
+    <color name="car_page_dot">#66000000</color>
+    <color name="car_page_dot_sel">#FF1C1C1E</color>
     <color name="car_focus_fill">#22000000</color>
     <color name="car_focus_stroke">#AA1C1C1E</color>
     <!-- 暗幕/模糊底色的基色：白天压白（保住浅色观感与深色文字对比），夜间压黑 -->

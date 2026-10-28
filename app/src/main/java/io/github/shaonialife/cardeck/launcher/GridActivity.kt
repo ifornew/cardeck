@@ -21,6 +21,7 @@ import io.github.shaonialife.cardeck.R
 import io.github.shaonialife.cardeck.input.KnobNav
 import io.github.shaonialife.cardeck.launcher.settings.ThemePrefs
 import io.github.shaonialife.cardeck.media.MediaSessionsState
+import io.github.shaonialife.cardeck.media.NotificationAccess
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
 import io.github.shaonialife.cardeck.render.SPLIT_MAP_WIDTH_RATIO
 import io.github.shaonialife.cardeck.ui.WallpaperStore
@@ -414,15 +415,21 @@ class GridActivity : AppCompatActivity() {
         val now = MediaSessionsState.nowPlaying
         val title = now?.title?.takeIf { it.isNotBlank() }
         val artist = now?.artist?.takeIf { it.isNotBlank() }
-        // 有会话但读不到任何元数据 + 未授权 → 权限问题，不是「没在播放」
-        val missingDueToPermission =
-            now != null && title == null && !MediaSessionsState.accessGranted
+        // 有会话但读不到任何元数据 + 权限确实没授予 → 权限问题，不是「没在播放」。
+        // 注意判据用 NotificationAccess.granted（系统授权列表里的事实），**不能**用
+        // MediaSessionsState.accessGranted——后者只代表「监听器此刻是否绑定」：
+        // 系统会周期解绑/重绑我们的监听器（华为实测每分钟一次），若用后者，
+        // 那个 1 秒窗口里卡片就会错误提示「未授予通知使用权」，用户照着去系统设置
+        // 也找不到问题（2026-10-28 实测截图）。
+        val permissionMissing = now != null && title == null && !NotificationAccess.granted
         panel.findViewById<TextView>(R.id.dashMediaTitle).text =
-            title ?: if (missingDueToPermission) "无法读取播放信息" else "未在播放"
+            title ?: if (permissionMissing) "无法读取播放信息" else "未在播放"
         panel.findViewById<TextView>(R.id.dashMediaArtist).text =
             artist
                 ?: when {
-                    missingDueToPermission -> "未授予「通知使用权」——请在系统设置中开启"
+                    permissionMissing -> "未授予「通知使用权」——请在系统设置中开启"
+                    // 已授权但监听器暂未绑定：系统会自动重绑，如实说明而不是误导
+                    now != null && title == null -> "媒体会话恢复中…"
                     now?.playing == true -> "正在播放"
                     else -> ""
                 }
@@ -848,6 +855,8 @@ class GridActivity : AppCompatActivity() {
         pages = listOf(listOf<Cell>(Cell.Dashboard)) + cells.chunked(columns * rows)
 
         val current = pager?.currentItem ?: 0
+        // 新会话首帧落点：连上就显示第一屏（仪表盘），不沿用上一会话停留的网格页
+        val landOnDashboard = VirtualLauncher.consumeLandOnDashboard()
         // 数据重建后旧高亮视图已失效（ViewHolder 会复用/销毁），光标复位
         clearHighlight()
         selectedIndex = -1
@@ -858,16 +867,23 @@ class GridActivity : AppCompatActivity() {
         // 落点见 exitDashboardPage——回到打开应用前的页 / 最近停留的网格页，不固定第 1 页
         if (VirtualLauncher.dashboardMode && current != 0) pager?.setCurrentItem(0, false)
         if (!VirtualLauncher.dashboardMode) {
-            val at = pager?.currentItem ?: 0
-            val restore = VirtualLauncher.consumeRestorePage()
-            // 停在仪表盘页、或 home 键登记了落点时才移动；用户自己停在网格第 N 页就不拽
-            val want = when {
-                restore > 0 -> restore
-                at == 0 -> VirtualLauncher.desktopGridPage
-                else -> at
+            if (landOnDashboard) {
+                // 用 syncDashboard 而不是 showDashboard：本 Activity 已在前台，
+                // 无需再 goGrid（那会再 am start 自己一次，多一轮 onResume/reload）
+                pager?.setCurrentItem(0, false)
+                VirtualLauncher.syncDashboard(true)
+            } else {
+                val at = pager?.currentItem ?: 0
+                val restore = VirtualLauncher.consumeRestorePage()
+                // 停在仪表盘页、或 home 键登记了落点时才移动；用户自己停在网格第 N 页就不拽
+                val want = when {
+                    restore > 0 -> restore
+                    at == 0 -> VirtualLauncher.desktopGridPage
+                    else -> at
+                }
+                val target = want.coerceIn(1, (pages.size - 1).coerceAtLeast(1))
+                if (at != target) pager?.setCurrentItem(target, false)
             }
-            val target = want.coerceIn(1, (pages.size - 1).coerceAtLeast(1))
-            if (at != target) pager?.setCurrentItem(target, false)
         }
         if ((pager?.currentItem ?: 0) >= pages.size) pager?.setCurrentItem(pages.size - 1, false)
         updateDots(pager?.currentItem ?: 0)
@@ -1018,6 +1034,20 @@ class GridActivity : AppCompatActivity() {
                         outline.setRoundRect(0, 0, view.width, view.height, roundRadius)
                     }
                 }
+            // 导航卡（回家/回单位）高度随卡片高度微调：设计基准 54dp @ 300dp 逻辑卡高
+            // （DASH_REF_HEIGHT_DP），高屏车机上按比例长一点、低屏按比例收一点，
+            // 上下限 50..66dp 防止极端车机比例下过高/过矮（2026-10-28 用户要求）。
+            panel.findViewById<View>(R.id.navCard).apply {
+                val dm = resources.displayMetrics
+                val margins = panel.layoutParams as ViewGroup.MarginLayoutParams
+                val cardLogicalDp = (dm.heightPixels - margins.topMargin - margins.bottomMargin) / dm.density
+                layoutParams =
+                    layoutParams.apply {
+                        height =
+                            ((54f * cardLogicalDp / DASH_REF_HEIGHT_DP).coerceIn(50f, 66f) * dm.density)
+                                .toInt()
+                    }
+            }
             panel.findViewById<View>(R.id.navCard).apply {
                 outlineProvider = roundOutline
                 clipToOutline = true
@@ -1304,6 +1334,9 @@ class GridActivity : AppCompatActivity() {
         val row = dotsRow ?: return
         val dotIdle = androidx.core.content.ContextCompat.getColor(this, R.color.car_page_dot)
         val dotSel = androidx.core.content.ContextCompat.getColor(this, R.color.car_page_dot_sel)
+        // 形状保持等大的圆点（用户明确不要胶囊）；当前页靠颜色区分：
+        // 未选中半透明、选中近黑/纯白（白天浅壁纸上「稍深一点的黑色系」，不用彩色，
+        // 2026-10-28 实车反馈）
         for (i in 0 until row.childCount) {
             (row.getChildAt(i).background as? android.graphics.drawable.GradientDrawable)
                 ?.setColor(if (i == selected) dotSel else dotIdle)

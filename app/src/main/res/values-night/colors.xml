@@ -20,7 +20,7 @@
     <color name="car_media_track">#33FFFFFF</color>
     <color name="car_media_progress">#FFF5F5F7</color>
     <color name="car_icon">#FFFFFFFF</color>
-    <color name="car_page_dot">#66FFFFFF</color>
+    <color name="car_page_dot">#59FFFFFF</color>
     <color name="car_page_dot_sel">#FFFFFFFF</color>
     <color name="car_focus_fill">#22FFFFFF</color>
     <color name="car_focus_stroke">#AAFFFFFF</color>

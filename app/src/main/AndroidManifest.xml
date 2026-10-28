@@ -120,6 +120,15 @@
             android:excludeFromRecents="true"
             android:theme="@style/Theme.CarPlaySender.Settings" />
 
+        <!-- 蓝牙 ACL 连接事件：常驻模式开启时，车机蓝牙物理连接自动唤醒连接流程 -->
+        <receiver
+            android:name=".bt.CarAutoConnectReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+            </intent-filter>
+        </receiver>
+
         <!-- Shizuku（隐形屏模式：am start 指定 display + MotionEvent 直注） -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"

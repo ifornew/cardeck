@@ -32,7 +32,9 @@ class DockActivity : AppCompatActivity() {
     private var clockView: TextView? = null
     private var batteryView: BatteryGlyphView? = null
     private var signalView: LinearLayout? = null
-    private var wifiView: ImageView? = null
+
+    /** 状态行（信号 + 电池）整体：按「时钟文字宽度」等比缩放（见 alignStatusToClock）。 */
+    private var statusView: View? = null
     private var barForm = false
 
     /**
@@ -129,7 +131,7 @@ class DockActivity : AppCompatActivity() {
         clockView = findViewById(R.id.dockClock)
         batteryView = findViewById(R.id.dockBattery)
         signalView = findViewById(R.id.dockSignal)
-        wifiView = findViewById(R.id.dockWifi)
+        statusView = findViewById(R.id.dockStatus)
         appsContainer = findViewById(R.id.dockApps)
         wallpaperView = findViewById(R.id.dockWallpaper)
         findViewById<ImageView>(R.id.dockHome).apply {
@@ -292,6 +294,34 @@ class DockActivity : AppCompatActivity() {
             size -= 0.5f * scale
             view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, size)
         }
+        alignStatusToClock(view)
+    }
+
+    /**
+     * 状态行（信号 + 电池）总宽对齐时钟文字宽（2026-10-28 用户要求）。
+     *
+     * 用等比缩放而非改布局尺寸：字形不变形，且不动 LinearLayout 的高度（不会挤动
+     * 下方应用列表）。pivot 取行中心 → 放大后仍居中在时钟正下方。
+     * 目标宽度含 letterSpacing 近似（paint.measureText 不计字间距）。
+     */
+    private fun alignStatusToClock(clock: TextView) {
+        val row = statusView ?: return
+        if (row.width <= 0 || row.height <= 0) {
+            row.post { if (!isFinishing && !isDestroyed) alignStatusToClock(clock) }
+            return
+        }
+        val text = clock.text?.toString().orEmpty()
+        if (text.isEmpty()) return
+        val glyphWidth = clock.paint.measureText(text)
+        val letterSpacing = clock.letterSpacing * clock.textSize * (text.length - 1).coerceAtLeast(0)
+        // ×0.94：实测与时间等宽时，电池描边 + 信号条外缘视觉上仍略超出时间一截
+        // （2026-10-28 用户复看），收一点让整体落在时间宽度之内。
+        val target = (glyphWidth + letterSpacing) * 0.94f
+        val scale = (target / row.width).coerceIn(0.8f, 2.4f)
+        row.pivotX = row.width / 2f
+        row.pivotY = row.height / 2f
+        row.scaleX = scale
+        row.scaleY = scale
     }
 
     /**
@@ -316,18 +346,15 @@ class DockActivity : AppCompatActivity() {
     }
 
     /**
-     * dock 状态栏信号区（对照原生 CarPlay）：
-     *  - 4 格圆角信号条 = 蜂窝信号强度（读不到时全部保持暗淡，不伪造格数）；
-     *  - Wi-Fi 图标 = 已连上 Wi-Fi（车机热点）时显示，与信号条并存。
+     * dock 状态栏信号区（对照原生 CarPlay）：4 格圆角信号条 = 蜂窝信号强度
+     * （读不到时全部保持暗淡，不伪造格数）。
+     *
+     * Wi-Fi 图标已移除（2026-10-28 用户反馈「比信号/电池小、也没信息量」）：
+     * 车机热点是投射的前提，投影期间它必然处于连接状态，图标永远点亮 → 无信息量；
+     * 状态行只保留信号 + 电池。
      */
     private fun updateSignal() {
         val container = signalView
-        val wifiOn =
-            runCatching {
-                val wm = applicationContext.getSystemService(android.net.wifi.WifiManager::class.java)
-                val info = wm?.connectionInfo
-                info != null && info.networkId >= 0 && info.rssi in -100..-20
-            }.getOrDefault(false)
         val level =
             runCatching {
                 val tm = getSystemService(android.telephony.TelephonyManager::class.java)
@@ -339,7 +366,6 @@ class DockActivity : AppCompatActivity() {
                     it.getChildAt(i).alpha = if (i < level) 1f else 0.25f
                 }
             }
-            wifiView?.visibility = if (wifiOn) View.VISIBLE else View.GONE
         }
     }
 
@@ -355,13 +381,14 @@ class DockActivity : AppCompatActivity() {
         lastRendered = current
         container.removeAllViews()
         val density = resources.displayMetrics.density
-        // dock 内宽 ≈ 37dp（侧栏 42dp 减去左右 padding；底栏高 42dp 减去上下 padding）。
-        // 图标可视尺寸与左下角主页字形对齐：主页 16dp 矢量在「内容宽 - 2×3dp」的盒子里
-        // fitCenter 后可见字形约 27dp 宽，这里取同一数值；外围 2dp 内边距用于点击热区，
-        // 图标之间留 6dp 间距。
-        val iconPx = (27 * density).toInt()
+        // dock 内宽 ≈ 28.2dp（侧栏 32dp 减去左右 padding 1.9dp×2；底栏高 32dp 减去
+        // 上下 padding）。图标盒 = iconPx + 2×2dp 内边距（点击热区），取 24dp 时
+        // 盒宽 28dp 正好放进 32dp 窄条（2026-10-28 dock 再收窄：42→36→32dp）。
+        val iconPx = (24 * density).toInt()
         val pad = (2 * density).toInt()
-        val gap = (6 * density).toInt()
+        // 图标间距 6dp→3dp（2026-10-28 用户反馈「间隔大了点」：盒内还有各 2dp 点击热区，
+        // 视觉间距 ≈ 3 + 4 = 7dp）
+        val gap = (3 * density).toInt()
         val apps = synchronized(VirtualLauncher.runningApps) { VirtualLauncher.runningApps.toList() }
         val iconCache = VirtualLauncher.iconCache
         apps.forEachIndexed { index, component ->
