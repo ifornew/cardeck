@@ -295,6 +295,7 @@ class DockActivity : AppCompatActivity() {
             view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, size)
         }
         alignStatusToClock(view)
+        syncHomeRowHeight()
     }
 
     /**
@@ -322,6 +323,24 @@ class DockActivity : AppCompatActivity() {
         row.pivotY = row.height / 2f
         row.scaleX = scale
         row.scaleY = scale
+    }
+
+    /**
+     * 主页按钮区高度对齐顶部「时间 + 信号 + 电量」块（2026-10-29 用户要求）：
+     * 底栏与顶栏等高，dock 上下两块视觉对称。
+     * 分隔线在 XML 里 top 锚定（= 主页按钮区上边界），行高变化不影响它与字形的相对位置。
+     */
+    private fun syncHomeRowHeight() {
+        val row = findViewById<View>(R.id.dockHomeRow) ?: return
+        val clock = clockView ?: return
+        val status = statusView ?: return
+        val statusGap = (status.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.topMargin ?: 0
+        val topH = clock.height + statusGap + status.height
+        if (topH <= 0 || row.layoutParams.height == topH) return
+        row.layoutParams = row.layoutParams.apply { height = topH }
+        VirtualLauncher.logSink?.invoke(
+            "DOCK: 主页按钮区高度对齐顶部块 → ${topH}px（时钟 ${clock.height} + 间距 $statusGap + 状态 ${status.height}）",
+        )
     }
 
     /**

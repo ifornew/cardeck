@@ -59,6 +59,8 @@ class CarPlayService : Service() {
         flags: Int,
         startId: Int,
     ): Int {
+        // 会话已断开但保留服务：只释放会话期唤醒锁，服务与投影继续存活以保住授权
+        val sessionIdle = intent?.action == ACTION_SESSION_IDLE
         // 前台类型必须一次定对，不能「先报 connectedDevice 再 upgrade」：
         // 每次「启动连接」都会 startService 进来，若这里只报 connectedDevice，
         // 服务先前持有的 mediaProjection 前台类型会被摘掉，系统随即停止投影（onStop）。
@@ -77,18 +79,27 @@ class CarPlayService : Service() {
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
             }
         try {
-            androidx.core.app.ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), types)
+            androidx.core.app.ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                buildNotification(connected = !sessionIdle),
+                types,
+            )
         } catch (error: Exception) {
             // 带 mediaProjection 类型被拒（授权已失效）：退回仅 connectedDevice，待重新授权
             fileLog("SVC: startForeground(types=$types) 失败 - ${error.message}，退回仅 connectedDevice")
             androidx.core.app.ServiceCompat.startForeground(
                 this,
                 NOTIFICATION_ID,
-                buildNotification(),
+                buildNotification(connected = !sessionIdle),
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
             )
         }
-        acquireLocks()
+        if (sessionIdle) {
+            releaseLocks()
+        } else {
+            acquireLocks()
+        }
         // 授权结果在（用户刚确认投屏）时创建投影
         if (pendingProjectionResult != null) takeProjection()
         return START_STICKY
@@ -145,6 +156,9 @@ class CarPlayService : Service() {
         private const val CHANNEL_ID = "carplay_connection"
         private const val NOTIFICATION_ID = 1
 
+        /** 用户断开连接：通知服务释放会话锁但继续持有投影（见 [releaseSessionLocks]）。 */
+        private const val ACTION_SESSION_IDLE = "io.github.shaonialife.cardeck.action.SESSION_IDLE"
+
         /** 镜像模式：授权后由 MainActivity 写入；服务重声明 FGS 类型后方可创建虚拟屏。 */
         @Volatile
         var mediaProjection: android.media.projection.MediaProjection? = null
@@ -180,9 +194,24 @@ class CarPlayService : Service() {
         fun stop(context: Context) {
             context.stopService(Intent(context, CarPlayService::class.java))
         }
+
+        /**
+         * 用户断开连接（会话结束）：释放会话期唤醒锁，但**不停止服务、不释放投影**。
+         * Android 14+ 的 MediaProjection 授权与服务的 mediaProjection 前台类型绑定，
+         * 停服务即失效；保留后下次连接无需重新授权（2026-10-28 用户要求）。
+         */
+        fun releaseSessionLocks(context: Context) {
+            runCatching {
+                context.startForegroundService(
+                    Intent(context, CarPlayService::class.java).setAction(ACTION_SESSION_IDLE),
+                )
+            }.onFailure {
+                android.util.Log.w("CarPlayService", "releaseSessionLocks 失败: ${it.javaClass.simpleName}")
+            }
+        }
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(connected: Boolean = true): Notification {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             manager.createNotificationChannel(
@@ -209,8 +238,14 @@ class CarPlayService : Service() {
         return NotificationCompat
             .Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setContentTitle("CarDeck 运行中")
-            .setContentText("正在保持与车机的连接，点开应用可查看日志")
+            .setContentTitle(if (connected) "CarDeck 运行中" else "CarDeck 待连接")
+            .setContentText(
+                if (connected) {
+                    "正在保持与车机的连接，点开应用可查看日志"
+                } else {
+                    "车机侧声音授权保持中，点开应用可启动连接"
+                },
+            )
             .setContentIntent(contentIntent)
             .setAutoCancel(false)
             .setOngoing(true)

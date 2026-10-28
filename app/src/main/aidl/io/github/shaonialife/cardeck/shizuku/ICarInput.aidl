@@ -2,6 +2,7 @@
 // 相比每次 spawn `input` 命令（约 200-400ms），injectInputEvent 直连系统服务。
 package io.github.shaonialife.cardeck.shizuku;
 
+import android.os.ParcelFileDescriptor;
 import android.view.Surface;
 
 interface ICarInput {
@@ -36,4 +37,11 @@ interface ICarInput {
     // 服务进程 PID：应用侧清理「非当前绑定进程」的陈旧 UserService 时用于排除自己
     // （旧进程持有的虚拟屏跨进程无法 release，杀进程是唯一释放途径，见 CarInputClient）。
     int pid();
+
+    // ---- 播放音频采集（免 MediaProjection 授权）----
+    // 以 shell uid 的 CAPTURE_AUDIO_OUTPUT 权限直接采 REMOTE_SUBMIX，
+    // 返回管道读端（服务侧持续写入采集到的 PCM），调用方读完即得音频流。
+    // 采样参数须与 SETUP 协商结果一致；bufferBytes 为采集缓冲提示。
+    ParcelFileDescriptor startAudioCapture(int sampleRate, int channelMask, int bufferBytes);
+    void stopAudioCapture();
 }

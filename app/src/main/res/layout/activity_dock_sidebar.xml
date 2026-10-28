@@ -115,21 +115,38 @@
             android:gravity="center_horizontal" />
     </ScrollView>
 
-    <View
+    <!-- 主页按钮行：行高由 DockActivity 对齐顶部「时间+信号+电量」块高度
+         （2026-10-29 用户要求 dock 上下两块等高）。
+         图标沿用 fitEnd 贴住按钮下边（fitCenter 会让 24×12 字形上下居中、底部留白过大）；
+         分隔线 top 锚定、无 margin = 主页按钮区上边界（「分隔线→屏幕底」= 8dp 内边距 + 行高，
+         与顶部「8dp 内边距 + 等高的时间/状态块」对称）。
+         分隔线先于图标声明：它不可点击，点击事件仍落在下方的 dockHome 上。 -->
+    <FrameLayout
+        android:id="@+id/dockHomeRow"
         android:layout_width="match_parent"
-        android:layout_height="0.38dp"
-        android:layout_marginBottom="1.52dp"
-        android:background="@color/car_divider_dim" />
+        android:layout_height="24dp">
 
-    <ImageView
-        android:id="@+id/dockHome"
-        android:layout_width="match_parent"
-        android:layout_height="24dp"
-        android:background="?android:attr/selectableItemBackgroundBorderless"
-        android:contentDescription="回到桌面"
-        android:padding="3dp"
-        android:scaleType="fitCenter"
-        android:src="@drawable/ic_dock_home"
-        android:tint="@color/car_icon" />
+        <!-- 顶边锚定：分隔线 = 主页按钮区上边界（区高由 DockActivity 对齐顶部块） -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="0.38dp"
+            android:layout_gravity="top|center_horizontal"
+            android:background="@color/car_divider_dim" />
+
+        <ImageView
+            android:id="@+id/dockHome"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="回到桌面"
+            android:paddingLeft="3dp"
+            android:paddingRight="3dp"
+            android:paddingTop="0dp"
+            android:paddingBottom="0dp"
+            android:scaleType="fitEnd"
+            android:src="@drawable/ic_dock_home"
+            android:tint="@color/car_icon" />
+    </FrameLayout>
+
     </LinearLayout>
 </FrameLayout>

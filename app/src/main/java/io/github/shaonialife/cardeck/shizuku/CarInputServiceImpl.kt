@@ -2,7 +2,11 @@ package io.github.shaonialife.cardeck.shizuku
 
 import android.content.Context
 import android.hardware.input.InputManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
 import android.view.InputDevice
@@ -10,6 +14,7 @@ import android.view.InputEvent
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
+import java.io.FileOutputStream
 import java.lang.reflect.Method
 
 /**
@@ -531,6 +536,129 @@ class CarInputServiceImpl(
             " setDisplayId=${setDisplayIdMethod != null}"
 
     override fun pid(): Int = android.os.Process.myPid()
+
+    // ---- 播放音频采集（免 MediaProjection 授权）----
+
+    /** 采集资源统一锁：AIDL 调用来自 binder 线程，采集泵在独立线程。 */
+    private val audioLock = Any()
+
+    private var audioRecord: AudioRecord? = null
+    private var audioWriteEnd: ParcelFileDescriptor? = null
+    private var audioThread: Thread? = null
+
+    /**
+     * 以 shell 身份（uid 2000，具备 CAPTURE_AUDIO_OUTPUT）直采 REMOTE_SUBMIX。
+     *
+     * 免 MediaProjection 授权：REMOTE_SUBMIX 本就是「把播放混音重定向到采集端点」的
+     * 虚拟输入源，shell 权限即可打开（应用侧走 this 管道读 PCM）。
+     * 返回管道读端；失败返回 null（原因写入 fileLog）。
+     */
+    override fun startAudioCapture(
+        sampleRate: Int,
+        channelMask: Int,
+        bufferBytes: Int,
+    ): ParcelFileDescriptor? {
+        // 先收拾上一次采集（重复调用视作重启）
+        stopAudioCapture()
+        var readEnd: ParcelFileDescriptor? = null
+        try {
+            val format =
+                AudioFormat
+                    .Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(channelMask)
+                    .build()
+            // 缓冲下限由系统给出；取 2 倍降低采集欠载（min<=0 说明参数不被接受，直接用调用方提示值）
+            val minBytes = AudioRecord.getMinBufferSize(sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT)
+            val bufferSize = if (minBytes > 0) maxOf(bufferBytes, minBytes * 2) else bufferBytes
+            val recorder =
+                AudioRecord
+                    .Builder()
+                    .setAudioSource(MediaRecorder.AudioSource.REMOTE_SUBMIX)
+                    .setAudioFormat(format)
+                    .setBufferSizeInBytes(bufferSize)
+                    .build()
+            if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+                fileLog("startAudioCapture 初始化失败 state=${recorder.state} buffer=$bufferSize")
+                runCatching { recorder.release() }
+                return null
+            }
+            val pipe = ParcelFileDescriptor.createPipe()
+            readEnd = pipe[0]
+            val writeEnd = pipe[1]
+            try {
+                recorder.startRecording()
+            } catch (t: Throwable) {
+                fileLog("startAudioCapture startRecording 失败：$t")
+                runCatching { recorder.release() }
+                runCatching { readEnd?.close() }
+                runCatching { writeEnd.close() }
+                return null
+            }
+            synchronized(audioLock) {
+                audioRecord = recorder
+                audioWriteEnd = writeEnd
+            }
+            val pump =
+                Thread(
+                    {
+                        val out = FileOutputStream(writeEnd.fileDescriptor)
+                        // 4096 为 4 字节对齐的整块（PCM16 立体声即 1024 帧）
+                        val buffer = ByteArray(4096)
+                        try {
+                            while (true) {
+                                val read = recorder.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
+                                if (read <= 0) {
+                                    fileLog("audio-pump 读取结束 read=$read（stop 或采集异常）")
+                                    break
+                                }
+                                out.write(buffer, 0, read)
+                            }
+                        } catch (t: Throwable) {
+                            // 读失败/写端关闭（EPIPE）即退出；异常绝不能冒泡（会杀 UserService 进程）
+                            fileLog("audio-pump 退出：${t.javaClass.simpleName} ${t.message}")
+                        } finally {
+                            runCatching { out.close() }
+                        }
+                    },
+                    "audio-pump",
+                )
+            pump.isDaemon = true
+            synchronized(audioLock) { audioThread = pump }
+            pump.start()
+            fileLog(
+                "startAudioCapture ok ${sampleRate}Hz mask=0x${channelMask.toString(16)} " +
+                    "buffer=$bufferSize pid=${android.os.Process.myPid()}",
+            )
+            return readEnd
+        } catch (t: Throwable) {
+            fileLog("startAudioCapture 失败：$t")
+            runCatching { readEnd?.close() }
+            stopAudioCapture()
+            return null
+        }
+    }
+
+    /** 停止采集（幂等）：置空字段 → 停/放录音器、关写端，采集泵随之退出。 */
+    override fun stopAudioCapture() {
+        val record: AudioRecord?
+        val writeEnd: ParcelFileDescriptor?
+        synchronized(audioLock) {
+            record = audioRecord
+            writeEnd = audioWriteEnd
+            audioRecord = null
+            audioWriteEnd = null
+            audioThread = null
+        }
+        // 没有在采的会话：直接返回（startAudioCapture 每次都先调本方法，避免刷日志）
+        if (record == null && writeEnd == null) return
+        runCatching { record?.stop() }
+        runCatching { record?.release() }
+        // 不 join 采集线程：blocking read 会因 stop() 返回非正数而自行退出
+        runCatching { writeEnd?.close() }
+        fileLog("stopAudioCapture record=${record != null} pipe=${writeEnd != null}")
+    }
 
     companion object {
         private const val TAG = "CarInputSvc"

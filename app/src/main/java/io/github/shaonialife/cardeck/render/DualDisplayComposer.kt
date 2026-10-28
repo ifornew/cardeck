@@ -26,6 +26,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 const val CARD_MARGIN_PX = 16
 
 /**
+ * 横屏仪表盘卡片的**左右**边距（流坐标 px）：与上下边距（dock 内边距 8px）一致。
+ * 地图 tile 左缘 8、右缘收半边距 4；音乐卡左缘 = 比例线 + 4 → 两卡中缝 8，
+ * 音乐卡右边距 8（2026-10-29 用户要求左右间距调小到 8px）。
+ */
+const val DASHBOARD_H_MARGIN_PX = 8
+
+/**
  * 横屏仪表盘分屏比例：地图 tile 占应用区宽度的比例（音乐卡占剩余 1-RATIO）。
  * 三方统一契约：本类 SPLIT 绘制、VirtualLauncher 建屏 tile 尺寸、GridActivity 音乐卡 leftMargin。
  * 0.50 等宽 50/50；0.58 地图略宽；0.75 当前用户偏好。
@@ -35,9 +42,9 @@ const val CARD_MARGIN_PX = 16
 var SPLIT_MAP_WIDTH_RATIO = 0.75f
 
 /**
- * 横屏 SPLIT 时地图卡片底边距（流坐标 px）。默认 CARD_MARGIN_PX；
- * VirtualLauncher 会在建屏后按「底部页点占位」（页点距底 8dp + 点径 6dp + 间隙 6dp）
- * 把底部内缩调大，避免页点压在卡片底边。顶部边距仍固定 CARD_MARGIN_PX。
+ * 横屏 SPLIT 时地图卡片的上下边距（流坐标 px，两者相等）。
+ * 默认 CARD_MARGIN_PX；VirtualLauncher 建屏后改为 dock 上下内边距，
+ * 使卡片顶边对齐 dock 时钟上缘、底边对齐主页按钮下缘（2026-10-28 用户要求）。
  */
 @Volatile
 var MAP_TILE_BOTTOM_INSET_PX = CARD_MARGIN_PX.toFloat()
@@ -625,15 +632,17 @@ class DualDisplayComposer(
                         // 横屏分屏比例由 SPLIT_MAP_WIDTH_RATIO 控制（地图更宽、音乐卡更窄，默认 58/42）。
                         // tileSlideFraction：随 pager 滑动把 tile 平移出/入左侧（视觉跟手）。
                         val appAreaW = outWidth - dockW
-                        val tileW = appAreaW * SPLIT_MAP_WIDTH_RATIO - CARD_MARGIN_PX - CARD_MARGIN_PX / 2f
+                        val tileW =
+                            appAreaW * SPLIT_MAP_WIDTH_RATIO -
+                            DASHBOARD_H_MARGIN_PX - DASHBOARD_H_MARGIN_PX / 2f
                         val slide = tileSlideFraction * appAreaW
                         drawInputUV(
                             map!!,
-                            dockW + CARD_MARGIN_PX - slide,
-                            dockW + CARD_MARGIN_PX + tileW - slide,
-                            // GL 坐标 y=0 在**下边**：底边内缩加在 y0，顶部仍留 CARD_MARGIN_PX
+                            dockW + DASHBOARD_H_MARGIN_PX - slide,
+                            dockW + DASHBOARD_H_MARGIN_PX + tileW - slide,
+                            // GL 坐标 y=0 在**下边**：上下边距同值（对齐 dock 时钟/主页按钮）
                             MAP_TILE_BOTTOM_INSET_PX,
-                            (outHeight - CARD_MARGIN_PX).toFloat(),
+                            outHeight - MAP_TILE_BOTTOM_INSET_PX,
                             cornerRadius = TILE_CORNER_RADIUS,
                         )
                     }

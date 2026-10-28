@@ -15,6 +15,7 @@ import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
 import io.github.shaonialife.cardeck.launcher.settings.ThemePrefs
 import io.github.shaonialife.cardeck.media.NotificationAccess
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
+import io.github.shaonialife.cardeck.render.DASHBOARD_H_MARGIN_PX
 import io.github.shaonialife.cardeck.render.DualDisplayComposer
 import io.github.shaonialife.cardeck.render.MAP_TILE_BOTTOM_INSET_PX
 import io.github.shaonialife.cardeck.render.OverlayCard
@@ -64,6 +65,19 @@ object VirtualLauncher {
 
     /** 底部页点占位（dp）：距底 8 + 点径 6 + 与卡片间隙 6；卡片底边据此内缩。 */
     private const val DOTS_BAND_DP = 20f
+
+    /**
+     * dock 上下内边距（dp；与 activity_dock_sidebar.xml 的 paddingTop/Bottom 同源）。
+     * 仪表盘地图卡/导航卡的顶边、地图卡/音乐卡的底边都按此值对齐：
+     * 顶边 = 时钟上缘、底边 = 主页按钮下缘（2026-10-28 用户要求）。
+     */
+    private const val DOCK_EDGE_INSET_DP = 3.05f
+
+    /** dock 上下内边距（流坐标 px；按 dock 屏密度换算，时钟顶到屏幕顶 = 主页底到屏幕底）。 */
+    @Volatile
+    private var dockEdgeInsetPx = CARD_MARGIN_PX
+
+    fun dockEdgeInsetStreamPx(): Int = dockEdgeInsetPx
 
     /**
      * 横屏应用屏超采样倍率（固定像素占位缩小的唯一杠杆，见 attach 注释）。
@@ -366,6 +380,8 @@ object VirtualLauncher {
         // 新会话：「本次会话不再提示」等用户级决定作废
         LetterboxHintController.resetSession()
         val density = densityDpi / 160f
+        // dock 上下内边距（px）：时钟上缘/主页按钮下缘到屏幕边的同一间距
+        dockEdgeInsetPx = (DOCK_EDGE_INSET_DP * density).toInt().coerceAtLeast(1)
         // dock 条物理宽度 = 42dp × 密度（密度随画布短边等比，见 DOCK_WIDTH_DP 注释）
         val thicknessPx = (DOCK_WIDTH_DP * density).toInt().coerceAtLeast(80)
         // 车机方向决定 dock 位置：横屏 → 左侧竖条；竖屏 → 底部横条（2026-10-11 用户要求）
@@ -400,9 +416,9 @@ object VirtualLauncher {
             mapTileHeight = (appHeightPx - CARD_MARGIN_PX * 3) / 2
         } else {
             // 横屏：地图 tile 宽度按 SPLIT_MAP_WIDTH_RATIO（默认 0.75，地图更宽），音乐卡占剩余。
-            // 边距与中缝规则同合成器：tile 左缘 16，右缘=tileW-16-8（右缘收半边距 8），
-            // 音乐卡左缘=应用区左缘+tileW-8，与 tile 右缘之间形成 16px 中缝。
-            mapTileWidth = (appWidth * SPLIT_MAP_WIDTH_RATIO).toInt() - CARD_MARGIN_PX * 3 / 2
+            // 左右边距同合成器（DASHBOARD_H_MARGIN_PX=8）：tile 左缘 8，右缘收半边距 4，
+            // 音乐卡左缘=比例线+4，与 tile 右缘之间形成 8px 中缝（2026-10-29 用户要求）。
+            mapTileWidth = (appWidth * SPLIT_MAP_WIDTH_RATIO).toInt() - DASHBOARD_H_MARGIN_PX * 3 / 2
             // 高度需等密度算出后按底部页点占位重算（见下方 gridDpi 处）
         }
         // 横屏应用屏的密度选择（2026-10-11 实测标定）：
@@ -442,11 +458,12 @@ object VirtualLauncher {
                 appPortraitDensity
             }
         gridDpi = appNativeDensity
-        // 底部页点占位：横屏地图卡底边内缩到页点之上（原 16px 会让页点压在卡片底缘）。
+        // 横屏地图卡片上下边距 = dock 上下内边距：顶边对齐时钟上缘、底边对齐主页按钮下缘
+        // （2026-10-28 用户要求；第一屏不再显示页点，无需为页点留位）。
         // 竖屏地图卡在上半区，不受影响。
         if (!dockAtBottom) {
-            MAP_TILE_BOTTOM_INSET_PX = dotsBandStreamPx().toFloat()
-            mapTileHeight = appHeightPx - CARD_MARGIN_PX - dotsBandStreamPx()
+            MAP_TILE_BOTTOM_INSET_PX = dockEdgeInsetPx.toFloat()
+            mapTileHeight = appHeightPx - dockEdgeInsetPx * 2
         } else {
             MAP_TILE_BOTTOM_INSET_PX = CARD_MARGIN_PX.toFloat()
         }
@@ -1032,10 +1049,10 @@ object VirtualLauncher {
      */
     fun refreshSplitRatio() {
         if (dockAtBottom || mapDisplayId < 0) return
-        val newTileW = (appAreaWidth * SPLIT_MAP_WIDTH_RATIO).toInt() - CARD_MARGIN_PX * 3 / 2
+        val newTileW = (appAreaWidth * SPLIT_MAP_WIDTH_RATIO).toInt() - DASHBOARD_H_MARGIN_PX * 3 / 2
         if (newTileW == mapTileWidth) return
         mapTileWidth = newTileW
-        mapTileHeight = appHeightPx - CARD_MARGIN_PX - (MAP_TILE_BOTTOM_INSET_PX).toInt()
+        mapTileHeight = appHeightPx - dockEdgeInsetPx * 2
         if (!mapFullscreen) {
             Bg.run("resize-map-after-split") { resizeMapDisplay(fullscreen = false) }
         }

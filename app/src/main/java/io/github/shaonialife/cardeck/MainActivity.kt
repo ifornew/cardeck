@@ -62,6 +62,9 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         const val DEFAULT_CONNECTING_HINT = "蓝牙 iAP2 握手 → 加入车机热点 → 建立 CarPlay 会话"
         const val KEY_DISCLAIMER_DEADLINE = "disclaimer_deadline"
+
+        /** 等 Shizuku UserService 绑定完成再探测免授权采集的上限（首次启动常见 0.5~2s）。 */
+        const val SHELL_AUDIO_PROBE_WAIT_MS = 3_000L
     }
 
     private lateinit var deviceSubtitle: TextView
@@ -108,6 +111,9 @@ class MainActivity : AppCompatActivity() {
     // 记在 pendingResidualDisplays，状态旁的「清理残留屏」按钮可再次发起
     private var startupCheckRunning = false
     private var pendingResidualDisplays: List<Pair<Int, String>>? = null
+
+    /** 免授权采集探测进行中（避免 1s 轮询重复打 UserService）。 */
+    private var shellProbeRunning = false
 
     // 英雄卡实时帧率：1s 轮询对 VideoSender 已发帧计数取差值
     private var lastSentFrames = 0L
@@ -159,7 +165,7 @@ class MainActivity : AppCompatActivity() {
             log("BLUETOOTH_CONNECT 授权: $granted")
             if (granted && pendingStartAfterBtPermission.compareAndSet(true, false)) {
                 // 授权期间 Shizuku 可能被停掉：这里同样走前置检查
-                ensureShizukuReady { showAudioChoiceDialog() }
+                ensureShizukuReady { beginConnection() }
             }
         }
 
@@ -227,39 +233,64 @@ class MainActivity : AppCompatActivity() {
             .AtomicBoolean(false)
 
     /**
-     * 「启动连接」前的音频选择弹窗：
-     * 音频与视频同时推流会显著增加负载（实测 48k 立体声 PCM ≈1.5Mbps + 视频 ≈4Mbps），
-     * 测试台出现画面卡顿与断连；真车链路能力未知。因此默认不推音频，需用户显式开启。
+     * 「启动连接」与「启动即自动连接」的统一入口：车机侧声音固定开启，不弹音频选择。
      *
-     * 三个选项竖排（横排会挤爆窄屏）：推荐项「仅视频」放第一位并用实心强调
-     * ——与正文「以看视频为主时建议暂不开启」一致；取消在最下。
+     * 顺序（2026-10-29 用户要求）：**先完成免授权采集检查，再开始连接**——
+     *  - 已探测可用 → 直接连；
+     *  - 已知不可用 → 走投屏授权（已持有直接连，否则弹授权框，授权后自动连）；
+     *  - 尚未探测 → 等 UserService 绑定完成后真探测一次，再按结果分支，
+     *    避免先连上再补授权（用户看到的是「已连接但没声音」）。
      */
-    private fun showAudioChoiceDialog() {
-        // 默认档 = 高质量媒体通路（type=102 + AAC-LC，真 iPhone 走这条）；
-        // 「兼容档」= 强制只走 PCM 旧通路（type=100），AAC 被车机直接拒掉时的人工退路。
-        // 按钮竖排每个约 36dp：横屏屏高只有 ~300dp，再多一个「取消」就会顶出屏幕，
-        // 因此横屏省略「取消」（弹窗默认可返回键/点外部关闭）。
-        val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-        val actions =
-            buildList {
-                add(
-                    DarkMessageDialog.Action(
-                        "仅视频（更流畅）",
-                        DarkMessageDialog.Emphasis.PRIMARY,
-                    ) { beginWithAudio(enabled = false) },
-                )
-                add(DarkMessageDialog.Action("开启声音") { beginWithAudio(enabled = true) })
-                if (!landscape) add(DarkMessageDialog.Action("取消") {})
+    private fun beginConnection() {
+        // 持久化：常驻/ACL 自动唤醒不走这里，必须记住声音已开启
+        SessionController.setAudioEnabled(this, true)
+        // 通路协商（AAC-LC 优先，不行自动退 PCM）在会话内自动完成，无人工分支
+        SessionController.audioPreferCompat = false
+        // 免授权采集以「探测真的读得到数据」为准：部分 ROM（EMUI/HKS）接口全成功但不出数据
+        when (SessionController.shellCaptureState()) {
+            true -> {
+                log("MODE: 车机侧声音已开启（Shizuku 采集已就绪，免投屏授权）")
+                startConnectionNow()
             }
-        DarkMessageDialog.show(
-            activity = this,
-            title = "是否在车机侧播放声音？",
-            message =
-                "开启后手机媒体/导航声音投到车机播放、手机本机静音（不开启则车上无声）。\n" +
-                    "音视频同时传会增加负载，以看视频为主时可先不开启。\n" +
-                    "开启声音需要「投屏」权限，会一并申请。",
-            actions = actions,
-        )
+            false -> startWithProjection()
+            null -> probeThenStart()
+        }
+    }
+
+    /** 免授权采集：等 UserService 绑定后探测一次；可用直接连，不可用立刻转投屏授权。 */
+    private fun probeThenStart() {
+        log("MODE: 正在探测 Shizuku 免授权采集…")
+        Bg.run("shell-audio-probe") {
+            // 首次启动（尤其常驻自动连接）时 UserService 往往还没绑好：
+            // 此时探测会被 probeShellCapture 当成「ROM 不支持」并缓存为 false，
+            // 所以先等绑定完成（与 releaseDisplays 的短等同一套路），超时才判失败。
+            val deadline = SystemClock.uptimeMillis() + SHELL_AUDIO_PROBE_WAIT_MS
+            while (CarInputClient.service == null && SystemClock.uptimeMillis() < deadline) {
+                CarInputClient.ensure(this)
+                Thread.sleep(100)
+            }
+            val ok = CarInputClient.service != null && SessionController.shellCaptureAvailable()
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                updateReadyRow()
+                if (ok) {
+                    log("MODE: 免授权采集可用——直接连接")
+                    startConnectionNow()
+                } else {
+                    startWithProjection()
+                }
+            }
+        }
+    }
+
+    /** 投屏授权由保活服务跨连接持有：断开连接不再释放，这里只在从未授权时申请一次。 */
+    private fun startWithProjection() {
+        if (CarPlayService.mediaProjection != null) {
+            log("MODE: 车机侧声音已开启（投屏权限已就绪，无需重新授权）")
+            startConnectionNow()
+            return
+        }
+        requestProjectionThenStart()
     }
 
     /** 「取消连接」确认弹窗（防误触）：中止当前连接尝试并断开蓝牙/WiFi 链路。 */
@@ -388,21 +419,21 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             log("ACCESS_FINE_LOCATION 授权: $granted")
             if (granted && pendingStartAfterLocationPermission.compareAndSet(true, false)) {
-                ensureShizukuReady { showAudioChoiceDialog() }
+                ensureShizukuReady { beginConnection() }
             }
         }
 
     /**
-     * 「断开连接」确认弹窗（防误触）：断开会立即中断车机画面，
-     * 且投屏授权随保活服务停止而失效（下次要车机侧声音需重新授权）。
+     * 「断开连接」确认弹窗（防误触）：断开会立即中断车机画面。
+     * 投屏授权由保活服务跨连接持有，断开不释放——下次连接无需重新授权。
      */
     private fun promptDisconnect() {
         DarkMessageDialog.show(
             activity = this,
             title = "断开连接？",
             message =
-                "将停止车机推流并关闭保活服务，车机画面会立即中断。\n\n" +
-                    "注意：投屏授权会随服务停止失效，下次如需车机侧声音请重新授权。",
+                "将停止车机推流，车机画面会立即中断。\n\n" +
+                    "车机侧声音的投屏授权会继续保留，下次连接无需重新授权。",
             actions =
                 listOf(
                     DarkMessageDialog.Action("取消") {},
@@ -462,7 +493,7 @@ class MainActivity : AppCompatActivity() {
         actions += DarkMessageDialog.Action("取消") {}
         actions +=
             DarkMessageDialog.Action("重试检查") {
-                ensureShizukuReady { showAudioChoiceDialog() }
+                ensureShizukuReady { beginConnection() }
             }
         when (state) {
             ShizukuGate.State.NOT_RUNNING ->
@@ -496,23 +527,8 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun beginWithAudio(enabled: Boolean) {
-        // 持久化：常驻/ACL 自动唤醒不走这个弹窗，必须记住本次选择
-        SessionController.setAudioEnabled(this, enabled)
-        // 声音只剩一个模式：通路协商（AAC-LC 优先，不行自动退 PCM）在会话内自动完成，
-        // 不再有「兼容档」这种人工分支。
-        SessionController.audioPreferCompat = false
-        if (!enabled) {
-            log("MODE: 本次连接仅推视频（未开启车机侧声音）")
-            startConnectionNow()
-            return
-        }
-        if (CarPlayService.mediaProjection != null) {
-            log("MODE: 已选择开启声音（投屏权限已就绪）")
-            startConnectionNow()
-            return
-        }
-        // 开启声音需要投屏权限（播放捕获的授权来源）：先申请，授权完成后再启动连接
+    /** 申请投屏授权（播放捕获的授权来源）：授权完成后自动继续启动连接。 */
+    private fun requestProjectionThenStart() {
         log("MODE: 开启声音需要投屏权限——先后申请（音频捕获依赖），授权后自动开始连接")
         pendingStartAfterProjection.set(true)
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
@@ -629,7 +645,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Shizuku 授权结果：状态行与英雄卡副标题立即刷新；若用户是被「请求授权」引导
-        // 过来的（pendingShizukuThenConnect），授权成功后直接接着走音频选择，不用再点一次。
+        // 过来的（pendingShizukuThenConnect），授权成功后直接接着启动连接，不用再点一次。
         shizukuPermissionListener =
             rikka.shizuku.Shizuku
                 .OnRequestPermissionResultListener { requestCode, grantResult ->
@@ -647,7 +663,7 @@ class MainActivity : AppCompatActivity() {
                         }
                         if (granted && pendingShizukuThenConnect) {
                             pendingShizukuThenConnect = false
-                            ensureShizukuReady { showAudioChoiceDialog() }
+                            ensureShizukuReady { beginConnection() }
                         } else if (!granted) {
                             snack("未获得 Shizuku 授权——连接仍不可用")
                         }
@@ -819,18 +835,20 @@ class MainActivity : AppCompatActivity() {
                 log("MODE: 常驻连接关闭")
             }
         }
-        // 已开启常驻：启动即自动进入连接等待（等价用户点「启动连接」）
+        // 已开启常驻：启动即自动连接，但**先等免授权采集检查**（2026-10-29 用户要求）：
+        // 与手动点「启动连接」走同一入口——检查可用直接连，不可用当场弹投屏授权，
+        // 不会出现「先连上车机再补声音」。
         if (SessionController.shouldAutoStart(this) && !SessionController.isSessionRunning()) {
             log("MODE: 常驻连接已开启——自动启动连接等待")
-            ensureShizukuReady { ensureBluetoothReady { SessionController.startConnection(this) } }
+            ensureShizukuReady { ensureBluetoothReady { beginConnection() } }
         }
 
         // ---- 英雄卡主操作 ----
         ctaButton.setOnClickListener {
             when (heroState) {
                 HeroState.CONNECTED -> promptDisconnect()
-                // 前置检查：Shizuku（硬性依赖）→ 蓝牙权限/开关 → 音频选择
-                HeroState.IDLE -> ensureShizukuReady { ensureBluetoothReady { showAudioChoiceDialog() } }
+                // 前置检查：Shizuku（硬性依赖）→ 蓝牙权限/开关 → 直接开声音并连接
+                HeroState.IDLE -> ensureShizukuReady { ensureBluetoothReady { beginConnection() } }
                 // 连接中可取消：卡在错误网络/等待回连时用户主动脱身（弹窗防误触）
                 HeroState.CONNECTING -> promptCancelConnecting()
                 null -> {}
@@ -866,6 +884,18 @@ class MainActivity : AppCompatActivity() {
 
         // 车机侧声音授权（原「申请投屏权限」）：RECORD_AUDIO + MediaProjection 一起请求
         btnAudio.setOnClickListener {
+            // Shizuku 采集可用时无需授权，避免多弹一个系统框
+            when (SessionController.shellCaptureState()) {
+                true -> {
+                    snack("Shizuku 采集已就绪，无需投屏授权")
+                    return@setOnClickListener
+                }
+                null -> if (CarInputClient.service != null) {
+                    snack("正在验证免授权采集…")
+                    return@setOnClickListener
+                }
+                false -> Unit
+            }
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
                 PackageManager.PERMISSION_GRANTED
             ) {
@@ -1202,7 +1232,24 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (bondedCount > 0) ready++
-        if (CarPlayService.mediaProjection != null) ready++
+        // 车机侧声音：Shizuku shell 采集（免投屏授权，须探测到真实数据）或投屏授权，任一可用即算就绪
+        val shellAudioState = SessionController.shellCaptureState()
+        val shellAudioReady = shellAudioState == true
+        val audioReady = CarPlayService.mediaProjection != null || shellAudioReady
+        if (audioReady) ready++
+        // 未探测且 Shizuku 服务在线：后台探测一次（约 600ms 上限，不占主线程）
+        if (shellAudioState == null && CarInputClient.service != null && !shellProbeRunning) {
+            shellProbeRunning = true
+            Bg.run("shell-audio-probe") {
+                SessionController.shellCaptureAvailable()
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) {
+                        shellProbeRunning = false
+                        updateReadyRow()
+                    }
+                }
+            }
+        }
 
         btBadge.visibility = if (bondedCount >= 0) View.VISIBLE else View.GONE
         if (bondedCount >= 0) {
@@ -1246,16 +1293,28 @@ class MainActivity : AppCompatActivity() {
         } else {
             btnPickTarget.visibility = View.GONE
         }
-        val projectionReady =
-            CarPlayService.mediaProjection != null
-        if (projectionReady) {
+        if (shellAudioReady) {
+            // Shizuku 就绪且探测到真实 PCM：shell uid 直采 REMOTE_SUBMIX，无需投屏授权
+            btnAudio.text = "就绪"
+            btnAudio.setTextColor(getColor(R.color.m3_ok))
+            audioDesc.text = "Shizuku 采集已就绪 · 免投屏授权 · 连接时自动开启声音"
+        } else if (shellAudioState == null && CarInputClient.service != null) {
+            btnAudio.text = "探测中"
+            btnAudio.setTextColor(getColor(R.color.m3_primary))
+            audioDesc.text = "正在验证免授权采集（约 1 秒）…"
+        } else if (CarPlayService.mediaProjection != null) {
             btnAudio.text = "已授权"
             btnAudio.setTextColor(getColor(R.color.m3_ok))
-            audioDesc.text = "投屏权限已就绪 · 连接时可选开启"
+            audioDesc.text = "投屏权限已就绪（保活中）· 连接时自动开启声音"
+        } else if (shellAudioState == false) {
+            // 本机 ROM 拦截 shell 录音（EMUI/HKS）：免授权采集不可用，仍需投屏授权
+            btnAudio.text = "授权"
+            btnAudio.setTextColor(getColor(R.color.m3_primary))
+            audioDesc.text = "本机 ROM 不支持免授权采集 · 需「投屏」权限（授权一次即保活）· 连接时自动开启声音"
         } else {
             btnAudio.text = "授权"
             btnAudio.setTextColor(getColor(R.color.m3_primary))
-            audioDesc.text = "需要「投屏」权限，可选 · 关闭时车机无声音"
+            audioDesc.text = "需要「投屏」权限（授权一次即保活）· 连接时自动开启声音"
         }
         readyCount.text = "$ready/4"
     }

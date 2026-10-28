@@ -23,6 +23,7 @@ import io.github.shaonialife.cardeck.launcher.settings.ThemePrefs
 import io.github.shaonialife.cardeck.media.MediaSessionsState
 import io.github.shaonialife.cardeck.media.NotificationAccess
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
+import io.github.shaonialife.cardeck.render.DASHBOARD_H_MARGIN_PX
 import io.github.shaonialife.cardeck.render.SPLIT_MAP_WIDTH_RATIO
 import io.github.shaonialife.cardeck.ui.WallpaperStore
 import io.github.shaonialife.cardeck.util.Bg
@@ -194,8 +195,12 @@ class GridActivity : AppCompatActivity() {
                     )
                 }.getOrNull() ?: return@run
             val margin = (CARD_MARGIN_PX * scale).toInt()
+            // 横屏左右边距 8px（与音乐卡实际边距一致，切片才对得齐）
+            val hMargin = (DASHBOARD_H_MARGIN_PX * scale).toInt()
+            // 横屏：上下边距 = dock 上下内边距（顶对齐时钟上缘、底对齐主页按钮下缘）
+            val edgeInset = (VirtualLauncher.dockEdgeInsetStreamPx() * scale).toInt()
             // 裁出音乐卡对应区域的壁纸切片（与卡片实际位置一致）：
-            //  横屏：右半（左缘=中线+半边距 8，与地图 tile 右缘形成 16px 中缝）
+            //  横屏：右半（左缘=中线+半边距 4，与地图 tile 右缘形成 8px 中缝）
             //  竖屏：下半（音乐卡在地图卡下方；顶 = 边距+tile 高+中缝）
             val cropX: Int
             val cropY: Int
@@ -207,13 +212,14 @@ class GridActivity : AppCompatActivity() {
                         .coerceAtMost(bitmap.height - 2)
             } else {
                 cropX =
-                    ((VirtualLauncher.dockWidthPx + VirtualLauncher.appAreaWidth / 2 + CARD_MARGIN_PX / 2) * scale)
+                    ((VirtualLauncher.dockWidthPx + VirtualLauncher.appAreaWidth / 2 + DASHBOARD_H_MARGIN_PX / 2) * scale)
                         .toInt()
                         .coerceAtMost(bitmap.width - 2)
-                cropY = margin.coerceAtMost(bitmap.height - 2)
+                cropY = edgeInset.coerceAtMost(bitmap.height - 2)
             }
-            val cropW = (bitmap.width - cropX - margin).coerceAtLeast(2)
-            val cropH = (bitmap.height - cropY - margin).coerceAtLeast(2)
+            val cropW = (bitmap.width - cropX - (if (VirtualLauncher.dockAtBottom) margin else hMargin)).coerceAtLeast(2)
+            val bottomInset = if (VirtualLauncher.dockAtBottom) margin else edgeInset
+            val cropH = (bitmap.height - cropY - bottomInset).coerceAtLeast(2)
             val crop = Bitmap.createBitmap(bitmap, cropX, cropY, cropW, cropH)
             // 预模糊 + 圆角：不再依赖 RenderEffect / clipToOutline（这两个硬件层在
             // 虚拟屏空闲时会被回收，整块渲染成黑）
@@ -802,6 +808,8 @@ class GridActivity : AppCompatActivity() {
         val dm = resources.displayMetrics
         val scale = VirtualLauncher.gridScale()
         val cardMargin = (CARD_MARGIN_PX * scale).toInt()
+        // 横屏左右边距（8px）：与地图 tile 的左缘/中缝同源（2026-10-29 用户要求）
+        val hMargin = (DASHBOARD_H_MARGIN_PX * scale).toInt()
         val bottomInset = maxOf(cardMargin, (VirtualLauncher.dotsBandStreamPx() * scale).toInt())
         // 与 DashboardHolder.bind 的 MarginLayoutParams 同源推导，保证换算的卡片尺寸一致
         val cardWidthPx: Int
@@ -814,9 +822,11 @@ class GridActivity : AppCompatActivity() {
                 bottomInset
         } else {
             val leftMargin =
-                ((VirtualLauncher.appAreaWidth * SPLIT_MAP_WIDTH_RATIO + CARD_MARGIN_PX / 2) * scale).toInt()
-            cardWidthPx = dm.widthPixels - leftMargin - cardMargin
-            cardHeightPx = dm.heightPixels - cardMargin - bottomInset
+                ((VirtualLauncher.appAreaWidth * SPLIT_MAP_WIDTH_RATIO + DASHBOARD_H_MARGIN_PX / 2) * scale).toInt()
+            cardWidthPx = dm.widthPixels - leftMargin - hMargin
+            // 横屏音乐卡上下边距 = dock 上下内边距（与地图卡顶/底边同一对齐线）
+            val edgeInset = (VirtualLauncher.dockEdgeInsetStreamPx() * scale).toInt()
+            cardHeightPx = dm.heightPixels - edgeInset * 2
         }
         if (cardWidthPx <= 0 || cardHeightPx <= 0) return this
         val fitDpi =
@@ -995,10 +1005,15 @@ class GridActivity : AppCompatActivity() {
             dashboardView = panel
             val scale = VirtualLauncher.gridScale()
             val cardMargin = (CARD_MARGIN_PX * scale).toInt()
+            // 横屏左右边距 8px：与地图 tile 的左缘/中缝同源（2026-10-29 用户要求）
+            val hMargin = (DASHBOARD_H_MARGIN_PX * scale).toInt()
             // 底部页点占位：与地图卡共用同一契约（VirtualLauncher.dotsBandStreamPx，流坐标 × 倍率）。
             // 卡片底边原来固定 cardMargin(≈16px)，页点顶边在 14dp，二者视觉上会叠一起。
             val dotsBandPx = (VirtualLauncher.dotsBandStreamPx() * scale).toInt()
             val bottomInset = maxOf(cardMargin, dotsBandPx)
+            // 横屏上下边距 = dock 上下内边距：音乐卡/导航卡顶边对齐时钟上缘，
+            // 音乐卡底边对齐主页按钮下缘（与地图卡同一对齐线）
+            val edgeInset = (VirtualLauncher.dockEdgeInsetStreamPx() * scale).toInt()
             panel.layoutParams =
                 android.view.ViewGroup
                     .MarginLayoutParams(
@@ -1012,14 +1027,14 @@ class GridActivity : AppCompatActivity() {
                             topMargin = cardMargin * 2 + (VirtualLauncher.mapTileHeight * scale).toInt()
                             bottomMargin = bottomInset
                         } else {
-                            // 横屏：音乐卡左缘 = 地图 tile 右缘 + CARD_MARGIN_PX(16) 中缝。
-                            // 合成器 tileW = appAreaW * RATIO - 24（左缘 16 + 右缘半距 8），
-                            // tile 右缘 = appAreaW * RATIO - 8；音乐卡左缘 = 右缘 + 16 = appAreaW * RATIO + 8。
+                            // 横屏：音乐卡左缘与地图 tile 之间留 8px 中缝。
+                            // 合成器 tileW = appAreaW * RATIO - 12（左缘 8 + 右缘半距 4），
+                            // tile 右缘 = appAreaW * RATIO - 4；音乐卡左缘 = 右缘 + 8 = appAreaW * RATIO + 4。
                             leftMargin =
-                                ((VirtualLauncher.appAreaWidth * SPLIT_MAP_WIDTH_RATIO + CARD_MARGIN_PX / 2) * scale).toInt()
-                            topMargin = cardMargin
-                            rightMargin = cardMargin
-                            bottomMargin = bottomInset
+                                ((VirtualLauncher.appAreaWidth * SPLIT_MAP_WIDTH_RATIO + DASHBOARD_H_MARGIN_PX / 2) * scale).toInt()
+                            topMargin = edgeInset
+                            rightMargin = hMargin
+                            bottomMargin = edgeInset
                         }
                     }
             // 根视图改为垂直 LinearLayout（导航卡+音乐卡）后，圆角裁剪要落在两张卡片
@@ -1332,6 +1347,8 @@ class GridActivity : AppCompatActivity() {
 
     private fun updateDots(selected: Int) {
         val row = dotsRow ?: return
+        // 第一屏（仪表盘）不显示翻页指示器：卡片已按 dock 对齐铺满，页点会压住卡片
+        row.visibility = if (selected == 0) View.GONE else View.VISIBLE
         val dotIdle = androidx.core.content.ContextCompat.getColor(this, R.color.car_page_dot)
         val dotSel = androidx.core.content.ContextCompat.getColor(this, R.color.car_page_dot_sel)
         // 形状保持等大的圆点（用户明确不要胶囊）；当前页靠颜色区分：

@@ -5,8 +5,10 @@ import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.projection.MediaProjection
+import android.os.ParcelFileDescriptor
 import io.github.shaonialife.cardeck.airplay.AirPlayCrypto
 import io.github.shaonialife.cardeck.airplay.TimingServer
+import java.io.FileInputStream
 import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -61,6 +63,11 @@ class AudioSender(
      * 发一个 [AudioSyncPacket] 建立 RTP↔NTP 锚点；0 = 车机没给（旧车机），只发音频。
      */
     private val controlPort: Int = 0,
+    /**
+     * 采集停止时的回调（shell 采集源用）：通知 UserService 收掉 REMOTE_SUBMIX 录音器。
+     * default null —— 投屏捕获（AudioRecord 本地持有）与单测都不需要。
+     */
+    private val onCaptureStop: (() -> Unit)? = null,
 ) {
     companion object {
         const val CHANNELS = 2
@@ -108,9 +115,94 @@ class AudioSender(
     private val stopped = AtomicBoolean(false)
     private var socket: DatagramSocket? = null
     private var syncSocket: DatagramSocket? = null
-    private var record: AudioRecord? = null
+    private var source: PcmSource? = null
     private var thread: Thread? = null
     private var syncThread: Thread? = null
+
+    /**
+     * PCM 采集源：把「从哪里拿 16bit 立体声 PCM」抽象出来，推流链路（同步包/封包/
+     * 诊断/自检）对来源无感。
+     *  - [RecordSource]：本进程 AudioRecord + MediaProjection 播放捕获（原路径）；
+     *  - [PipeSource]：Shizuku UserService（shell uid）直采 REMOTE_SUBMIX 后的管道读端。
+     */
+    private interface PcmSource {
+        /** 采集线程里调用（AudioRecord.startRecording 等）；管道源直接 true。 */
+        fun start(): Boolean
+
+        /** 读满 dst；返回实际字节数，<0 = 结束/错误。 */
+        fun readFully(dst: ByteArray): Int
+
+        fun release()
+    }
+
+    /** MediaProjection 播放捕获源（AudioRecord 由本进程持有）。 */
+    private class RecordSource(
+        private val record: AudioRecord,
+        private val log: (String) -> Unit,
+    ) : PcmSource {
+        override fun start(): Boolean =
+            try {
+                record.startRecording()
+                true
+            } catch (error: Exception) {
+                log("AUDIO: 启动采集失败 - ${error.message}")
+                false
+            }
+
+        override fun readFully(dst: ByteArray): Int {
+            var offset = 0
+            while (offset < dst.size) {
+                val read = record.read(dst, offset, dst.size - offset, AudioRecord.READ_BLOCKING)
+                if (read < 0) return read
+                offset += read
+            }
+            return offset
+        }
+
+        override fun release() {
+            runCatching { record.stop() }
+            runCatching { record.release() }
+        }
+    }
+
+    /** shell 采集源：UserService 写入的 PCM 管道读端。 */
+    private class PipeSource(
+        private val pipe: ParcelFileDescriptor,
+    ) : PcmSource {
+        private var input: FileInputStream? = null
+        private var released = false
+
+        override fun start(): Boolean = true
+
+        override fun readFully(dst: ByteArray): Int {
+            val stream =
+                try {
+                    input ?: FileInputStream(pipe.fileDescriptor).also { input = it }
+                } catch (_: Exception) {
+                    return -1
+                }
+            var offset = 0
+            return try {
+                while (offset < dst.size) {
+                    val read = stream.read(dst, offset, dst.size - offset)
+                    // EOF（服务侧停止）或异常一律按结束处理
+                    if (read < 0) return -1
+                    offset += read
+                }
+                offset
+            } catch (_: Exception) {
+                -1
+            }
+        }
+
+        override fun release() {
+            if (released) return
+            released = true
+            runCatching { input?.close() }
+            input = null
+            runCatching { pipe.close() }
+        }
+    }
 
     /** AAC-LC 编码器（仅 [AudioCodec.AAC_LC] 时创建）。 */
     private var aacEncoder: AacLcEncoder? = null
@@ -234,21 +326,6 @@ class AudioSender(
         if (running.get()) return true
         stopped.set(false)
         return try {
-            val client = DatagramSocket()
-            client.connect(InetAddress.getByName(host), dataPort)
-            socket = client
-
-            // AAC 通路先把编码器立起来：编不出来就没必要采集（也避免「有包无声」的假象）
-            if (codec == AudioCodec.AAC_LC) {
-                val encoder = AacLcEncoder(sampleRate, CHANNELS, wrapAdts = adtsFrames, log = log)
-                if (!encoder.start()) {
-                    client.close()
-                    socket = null
-                    return false
-                }
-                aacEncoder = encoder
-            }
-
             val captureConfig = buildCaptureConfig(projection)
             val audioFormat =
                 AudioFormat
@@ -267,17 +344,57 @@ class AudioSender(
             if (recorder.state != AudioRecord.STATE_INITIALIZED) {
                 log("AUDIO: AudioRecord 初始化失败（state=${recorder.state}）")
                 runCatching { recorder.release() }
-                aacEncoder?.stop()
-                aacEncoder = null
-                client.close()
-                socket = null
                 return false
             }
-            record = recorder
+            startCapture(RecordSource(recorder, log), "播放捕获（MediaProjection）")
+        } catch (error: Exception) {
+            log("AUDIO: 启动失败 - ${error.message}")
+            stop()
+            false
+        }
+    }
+
+    /**
+     * 以 Shizuku UserService（shell uid）的 REMOTE_SUBMIX 采集启动发送。
+     *
+     * 与 [start] 的区别只在「PCM 从哪来」：这里读的是服务侧写来的管道，免投屏授权、
+     * 免 RECORD_AUDIO；封包/同步包/诊断链路完全共用 [startCapture]。
+     */
+    fun startShellCapture(pipe: ParcelFileDescriptor): Boolean {
+        if (running.get()) return true
+        stopped.set(false)
+        return startCapture(PipeSource(pipe), "播放捕获（shell REMOTE_SUBMIX · 免投屏授权）")
+    }
+
+    /** 采集源无关的启动主体：套接字、编码器、静音、同步包、采集线程。 */
+    private fun startCapture(
+        src: PcmSource,
+        captureDesc: String,
+    ): Boolean {
+        return try {
+            val client = DatagramSocket()
+            client.connect(InetAddress.getByName(host), dataPort)
+            socket = client
+
+            // AAC 通路先把编码器立起来：编不出来就没必要采集（也避免「有包无声」的假象）
+            if (codec == AudioCodec.AAC_LC) {
+                val encoder = AacLcEncoder(sampleRate, CHANNELS, wrapAdts = adtsFrames, log = log)
+                if (!encoder.start()) {
+                    src.release()
+                    // shell 采集：读端已关，也要请服务收掉录音器（否则 REMOTE_SUBMIX 一直挂着重定向播放）
+                    runCatching { onCaptureStop?.invoke() }
+                    client.close()
+                    socket = null
+                    return false
+                }
+                aacEncoder = encoder
+            }
+
+            source = src
             running.set(true)
             mutePhoneMedia()
             log(
-                "AUDIO: 已启动（播放捕获 ${sampleRate}Hz 立体声 → $host:$dataPort，" +
+                "AUDIO: 已启动（$captureDesc ${sampleRate}Hz 立体声 → $host:$dataPort，" +
                     "通路=t$streamType/${codec.name}，" +
                     if (codec == AudioCodec.AAC_LC) {
                         "每包 1 个 AAC 帧（${AacLcEncoder.FRAME_SAMPLES} 采样" +
@@ -292,10 +409,8 @@ class AudioSender(
 
             Thread(
                 {
-                    try {
-                        recorder.startRecording()
-                    } catch (error: Exception) {
-                        log("AUDIO: 启动采集失败 - ${error.message}")
+                    if (!src.start()) {
+                        log("AUDIO: 采集源未启动（$captureDesc）——终止本次音频")
                         stop()
                         return@Thread
                     }
@@ -309,6 +424,7 @@ class AudioSender(
             }
             true
         } catch (error: Exception) {
+            runCatching { src.release() }
             log("AUDIO: 启动失败 - ${error.message}")
             stop()
             false
@@ -325,9 +441,10 @@ class AudioSender(
     fun stop() {
         if (!stopped.compareAndSet(false, true)) return
         running.set(false)
-        runCatching { record?.stop() }
-        runCatching { record?.release() }
-        record = null
+        source?.release()
+        source = null
+        // shell 采集源：请 UserService 一并收掉录音器（旧服务无此事务时静默忽略）
+        runCatching { onCaptureStop?.invoke() }
         aacEncoder?.stop()
         aacEncoder = null
         runCatching { socket?.close() }
@@ -407,7 +524,7 @@ class AudioSender(
     // ---- 采集循环 → 封包发送 ----
 
     private fun runCaptureLoop() {
-        val recorder = record ?: return
+        val src = source ?: return
         val frameBytes = framePcmBytes
         val pcm = ByteArray(frameBytes)
         // 诊断抽样节拍：PCM 约 125 包/s（每 20s 一次）；AAC 约 47 帧/s
@@ -416,7 +533,7 @@ class AudioSender(
             while (running.get()) {
                 val read =
                     try {
-                        recorder.read(pcm, 0, pcm.size, AudioRecord.READ_BLOCKING)
+                        src.readFully(pcm)
                     } catch (error: Exception) {
                         log("AUDIO: 采集读取异常 - ${error.message}")
                         break

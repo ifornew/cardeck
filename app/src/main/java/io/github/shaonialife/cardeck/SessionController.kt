@@ -44,6 +44,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 进程级会话中枢：**日志缓冲**与**会话管线所有权**的唯一持有者。
@@ -286,7 +287,7 @@ object SessionController {
     @Volatile
     var currentAudioHost: String? = null
 
-    /** 本次会话是否在车机侧播放声音（由「启动连接」弹窗选择）。 */
+    /** 本次会话是否在车机侧播放声音（默认开启，可在连接中手动关闭）。 */
     @Volatile
     var audioEnabledForSession: Boolean = false
 
@@ -297,6 +298,81 @@ object SessionController {
      */
     @Volatile
     var audioPreferCompat: Boolean = false
+
+    /**
+     * 免授权采集（Shizuku shell REMOTE_SUBMIX）可用性：null = 未探测，true = 可用，
+     * false = 本机 ROM 拦截。实测华为 EMUI12：AudioRecord 能初始化、startRecording 成功，
+     * 但 read 立即返回 0（HKS 清零 uid 2000 非应用进程的录音），因此只能靠「实际读到的
+     * 字节数」判定。探测由界面后台发起，会话内只读缓存，不阻塞。
+     */
+    @Volatile
+    private var shellCaptureOk: Boolean? = null
+
+    /** 探测互斥：界面轮询与连接流程可能同时触发。 */
+    private val shellProbeLock = Any()
+
+    /** 免授权采集探测结果（null = 尚未探测）。 */
+    fun shellCaptureState(): Boolean? = shellCaptureOk
+
+    /** 探测 shell 免授权采集是否真能出数据（约 600ms 上限，必须后台线程调用）。 */
+    fun shellCaptureAvailable(): Boolean {
+        shellCaptureOk?.let { return it }
+        synchronized(shellProbeLock) {
+            shellCaptureOk?.let { return it }
+            val ok =
+                runCatching { probeShellCapture() }.getOrElse {
+                    appendLog("AUDIO: 免授权采集探测异常 - ${it.message}")
+                    false
+                }
+            shellCaptureOk = ok
+            appendLog(
+                if (ok) {
+                    "AUDIO: 免授权采集探测 → 可用（shell REMOTE_SUBMIX 有数据）"
+                } else {
+                    "AUDIO: 免授权采集探测 → 不可用（本机 ROM 拦截 shell 录音，读不到任何 PCM），改用投屏授权"
+                },
+            )
+            return ok
+        }
+    }
+
+    private fun probeShellCapture(): Boolean {
+        val service = CarInputClient.service ?: return false
+        val pipe =
+            runCatching {
+                service.startAudioCapture(
+                    PROBE_SAMPLE_RATE,
+                    android.media.AudioFormat.CHANNEL_IN_STEREO,
+                    AudioSender.PACKET_BYTES * 4,
+                )
+            }.getOrNull() ?: return false
+        // 读线程只等到第一块数据（正常机器 ~20ms 就有），本机读不到则一直阻塞
+        val bytes = AtomicInteger(0)
+        val stream = android.os.ParcelFileDescriptor.AutoCloseInputStream(pipe)
+        val reader =
+            Thread(
+                {
+                    val buffer = ByteArray(4096)
+                    try {
+                        while (bytes.get() == 0) {
+                            val n = stream.read(buffer)
+                            if (n <= 0) break
+                            bytes.addAndGet(n)
+                        }
+                    } catch (_: Throwable) {
+                    }
+                },
+                "shell-audio-probe",
+            )
+        reader.isDaemon = true
+        reader.start()
+        reader.join(PROBE_WAIT_MS)
+        // 关写端让阻塞读退出，再等读线程收尾
+        runCatching { service.stopAudioCapture() }
+        reader.join(300L)
+        runCatching { stream.close() }
+        return bytes.get() > 0
+    }
 
     /** 本轮真正用上的音频档位（拆链归因与记忆回写用；null = 本次没有音频）。 */
     @Volatile
@@ -316,6 +392,10 @@ object SessionController {
      * 与首个欠载周期的余量。
      */
     private const val AUDIO_PROFILE_PROBE_MS = 20_000L
+
+    /** 免授权采集探测：采样率（与 SETUP 主档一致）与等待首块数据的上限。 */
+    private const val PROBE_SAMPLE_RATE = 48_000
+    private const val PROBE_WAIT_MS = 600L
 
     /** 会话建立互斥（端点交接 → 配对 → 推流全程只允许一条）。 */
     val sessionStarting = AtomicBoolean(false)
@@ -541,8 +621,6 @@ object SessionController {
         // bring-up failed 并拆整轮无线栈（含推流中的 AirPlay 会话，2026-10-16 实测）。
         detachActiveBtSessions()
         phaseHint = null
-        CarPlayService
-            .stop(context)
         bluetoothServer?.stop()
         bluetoothClient?.stop()
         ctrlAdvertiser?.stop()
@@ -551,9 +629,13 @@ object SessionController {
         boundCarSsid = null
         if (hadProjection) {
             // Android 14+：MediaProjection 与保活服务（mediaProjection FGS 类型）绑定，
-            // 停服务会连带失效授权——下次连接需重新点「申请投屏权限」
-            appendLog("已手动断开并停止保活服务（常亮已恢复）；投屏授权已随服务停止失效，下次连接如需声音请重新申请")
+            // 停服务会连带失效授权。为了让「声音授权保活、下次连接不再授权」，
+            // 断开只收会话、保留服务与投影（2026-10-28 用户要求）；唤醒锁随会话释放。
+            CarPlayService.releaseSessionLocks(context)
+            appendLog("已手动断开（保活服务保留：车机侧声音授权继续有效，下次连接无需重新授权）")
         } else {
+            CarPlayService
+                .stop(context)
             appendLog("已手动断开并停止保活服务（常亮已恢复）")
         }
     }
@@ -1415,7 +1497,7 @@ object SessionController {
     ): Boolean {
         if (!audioEnabledForSession) return false
         if (sessionKey == null) return false
-        if (CarPlayService.mediaProjection == null) return false
+        if (CarPlayService.mediaProjection == null && shellCaptureOk != true) return false
         // 记忆只影响排序、不影响「试不试」，所以这里只看到底有没有候选档位
         return client.audioCandidates(preferCompat = audioPreferCompat).isNotEmpty()
     }
@@ -1423,8 +1505,9 @@ object SessionController {
     /**
      * 音频通道（手机 → 车机，RTP over UDP）：SETUP type=100 协商 → 播放捕获 → ChaCha 封包推流。
      *
-     * 依赖 MediaProjection（AudioPlaybackCapture 的授权来源），且需用户在「启动连接」
-     * 弹窗中选择「开启声音」——音视频同时推流显著增加负载（实测会卡顿/断连）。
+     * 采集来源：优先 Shizuku UserService（shell uid 直采 REMOTE_SUBMIX，免投屏授权），
+     * 不可用时回退 MediaProjection 播放捕获；且需用户在「启动连接」弹窗中选择「开启声音」
+     * ——音视频同时推流显著增加负载（实测会卡顿/断连）。
      *
      * @return 音频通道是否真正启动（调用方据此决定是否补发 RECORD 激活新加入的流）
      */
@@ -1435,7 +1518,7 @@ object SessionController {
         host: String?,
     ): Boolean {
         if (!audioEnabledForSession) {
-            appendLog("AUDIO: 本次连接未开启车机侧声音（「启动连接」弹窗选择）——仅推视频")
+            appendLog("AUDIO: 本次连接未开启车机侧声音（已手动关闭）——仅推视频")
             return false
         }
         if (sharedSecret == null) {
@@ -1448,11 +1531,18 @@ object SessionController {
             appendLog("AUDIO: 无接收端可用地址，跳过音频通道")
             return false
         }
+        // 采集来源二选一：Shizuku shell 采集（免投屏授权，优先）／MediaProjection 播放捕获（回退）。
+        // shell 路径须以「探测真的读得到数据」为准：部分 ROM（华为 EMUI/HKS）接口全成功但不出数据。
         val projection = CarPlayService.mediaProjection
-        if (projection == null) {
+        val shellService = CarInputClient.service
+        val shellReady = shellService != null && shellCaptureOk == true
+        if (projection == null && !shellReady) {
             appendLog(
-                "AUDIO: 缺少投屏权限（播放捕获依赖 MediaProjection）——音频通道未启动。" +
-                    "现在点「申请投屏权限」也可即时补启（无需重连）；注意「断开连接」会停服务并连带失效投屏授权",
+                if (shellService != null && shellCaptureOk == false) {
+                    "AUDIO: 本机 ROM 拦截 shell 录音（免授权采集不可用）——需投屏授权后即时补启（无需重连）"
+                } else {
+                    "AUDIO: 既无 Shizuku 采集服务也无投屏授权——音频通道未启动"
+                },
             )
             return false
         }
@@ -1524,9 +1614,37 @@ object SessionController {
                     // 同步包目标端口：车机在 SETUP 应答里下发。缺了它就没有 RTP↔NTP 锚点，
                     // 接收端只能「按到达时刻猜」，严格的实现干脆不排播（2026-10-20 实测）。
                     controlPort = audio.controlPort,
+                    // shell 采集：停流时请 UserService 收掉 REMOTE_SUBMIX 录音器
+                    onCaptureStop = { runCatching { CarInputClient.service?.stopAudioCapture() } },
                 )
             audioSender = sender
-            if (!sender.start(projection)) {
+            val shellPipe =
+                if (shellReady) {
+                    runCatching {
+                        CarInputClient.service?.startAudioCapture(
+                            audio.sampleRate,
+                            android.media.AudioFormat.CHANNEL_IN_STEREO,
+                            AudioSender.PACKET_BYTES * 8,
+                        )
+                    }.getOrElse {
+                        appendLog("AUDIO: shell 采集启动异常 - ${it.message}")
+                        null
+                    }
+                } else {
+                    null
+                }
+            if (shellPipe != null) {
+                appendLog("AUDIO: 本次采集来源 = Shizuku shell（免投屏授权）")
+            } else if (projection != null) {
+                appendLog("AUDIO: 本次采集来源 = 投屏授权（MediaProjection）")
+            }
+            val started =
+                when {
+                    shellPipe != null -> sender.startShellCapture(shellPipe) // 免授权
+                    projection != null -> sender.start(projection) // 回退投屏授权
+                    else -> false
+                }
+            if (!started) {
                 audioSender = null
                 activeAudioProfile = null
                 activeAudioStartedAt = 0L
