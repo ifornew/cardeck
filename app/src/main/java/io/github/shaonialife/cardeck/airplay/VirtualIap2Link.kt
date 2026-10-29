@@ -427,13 +427,42 @@ class VirtualIap2Link(
         val identity = mfiIdentity ?: return
         if (mfiOrder.isEmpty()) {
             mfiMemory = MfiLengthMemory.load(mfiContext, identity)
-            mfiOrder = MfiLengthMemory.orderAttempts(TUNNEL_MFI_BASELINE, mfiMemory)
-            if (!mfiMemory.isEmpty) {
-                log(
-                    "IAPLINK: 隧道 MFi 按车机记忆：${MfiLengthMemory.describe(mfiMemory)}" +
-                        " → 本轮顺序 ${mfiOrder.joinToString("/")}B",
-                )
-            }
+            // 与蓝牙路径同语义：已知成功长度就只发这一档（错误长度会让车机拆链）；
+            // 从不回应任何挑战的车机直接跳过挑战，不发随机长度。
+            mfiOrder =
+                when {
+                    mfiMemory.succeeded != null -> {
+                        log("IAPLINK: 隧道 MFi 该车机已确定挑战长度 ${mfiMemory.succeeded}B——本轮只发这一档（不再用其它长度试探）")
+                        listOf(mfiMemory.succeeded!!)
+                    }
+
+                    MfiLengthMemory.neverAnswered(mfiMemory, TUNNEL_MFI_BASELINE) -> {
+                        log(
+                            "IAPLINK: 隧道 MFi 该车机从未应答任何挑战（记忆：${MfiLengthMemory.describe(mfiMemory)}）" +
+                                "——跳过 0xaa02，直接 0xaa05 自报",
+                        )
+                        emptyList()
+                    }
+
+                    else -> {
+                        val order = MfiLengthMemory.orderAttempts(TUNNEL_MFI_BASELINE, mfiMemory)
+                        if (!mfiMemory.isEmpty) {
+                            log(
+                                "IAPLINK: 隧道 MFi 按车机记忆：${MfiLengthMemory.describe(mfiMemory)}" +
+                                    " → 本轮顺序 ${order.joinToString("/")}B",
+                            )
+                        }
+                        order
+                    }
+                }
+        }
+        if (mfiOrder.isEmpty()) {
+            // 车机从不回应挑战：不发随机挑战，直接自报成功并起 MIB3 突发
+            mfiFinished = true
+            mib3AuthStage = 4
+            sendCsmLocked(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
+            sendMib3BurstLocked()
+            return
         }
         mfiPosition += 1
         if (mfiPosition >= mfiOrder.size) {

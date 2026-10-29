@@ -152,7 +152,22 @@ class WifiCarPlayConnector(
         if (boundNetwork.get() == null) return false
         if (isCurrentNetworkAlive()) return true
         val ssid = lastSsid.orEmpty()
-        log("WiFi: 绑定网络已被系统回收（onLost 未回调）——释放绑定，下一轮重新加入 \"$ssid\"")
+        // 关键诊断（2026-10-29 实车）：区分「ROM 关掉了 WLAN 总开关」还是「只是丢了
+        // 这条本地绑定」。前者是 EMUI 电源/智能 WLAN 策略（应用层无法阻止，只能引导
+        // 用户关掉对应开关），后者可以用「重新 requestNetwork」自愈。
+        val wifiEnabled =
+            try {
+                @Suppress("DEPRECATION")
+                (context.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager)
+                    .isWifiEnabled
+            } catch (_: Exception) {
+                false
+            }
+        log(
+            "WiFi: 绑定网络已被系统回收（onLost 未回调，WLAN 总开关=" +
+                (if (wifiEnabled) "开" else "关") +
+                "）——释放绑定，下一轮重新加入 \"$ssid\"",
+        )
         // release() 内部会因 boundNetwork 非空而 bindProcessToNetwork(null)
         release()
         onNetworkLost?.invoke(ssid)

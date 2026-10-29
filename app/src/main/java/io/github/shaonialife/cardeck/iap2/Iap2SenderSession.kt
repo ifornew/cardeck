@@ -532,8 +532,24 @@ class Iap2SenderSession(
             }
         val windowOf = MFI_ATTEMPTS.associate { it.first to it.second }
         val memory = MfiLengthMemory.load(context, receiverKey)
-        val order = MfiLengthMemory.orderAttempts(baselineLengths, memory)
-        if (!memory.isEmpty) {
+        // 只发一档的情形（对齐真 iPhone：它每轮只发**一个** 20B 挑战）：
+        //  - 已知成功长度：不再用其它长度试探。错误长度会让车机拆链
+        //    （BMW NBTevo 实测：32B/16B 期间对端直接关掉 iAP2 链路）；
+        //  - 从不回应：直接跳过挑战（见 MfiLengthMemory.neverAnswered）。
+        val order =
+            if (memory.succeeded != null) {
+                log("iap2 MFi 该车机已确定挑战长度 ${memory.succeeded}B——本轮只发这一档（不再用其它长度试探）")
+                listOf(memory.succeeded!!)
+            } else if (MfiLengthMemory.neverAnswered(memory, baselineLengths)) {
+                log(
+                    "iap2 MFi 该车机从未应答任何挑战（记忆：${MfiLengthMemory.describe(memory)}）" +
+                        "——跳过 0xaa02，直接 0xaa05 自报",
+                )
+                return
+            } else {
+                MfiLengthMemory.orderAttempts(baselineLengths, memory)
+            }
+        if (!memory.isEmpty && memory.succeeded == null) {
             log(
                 "iap2 MFi 按车机记忆（$receiverKey）：${MfiLengthMemory.describe(memory)}" +
                     " → 本轮顺序 ${order.joinToString("/")}B",

@@ -169,6 +169,42 @@ class AirPlayClient(
     var pairingInProgress: Boolean = false
         private set
 
+    /**
+     * 本次连接是否已和接收端建立起 AirPlay 会话（SETUP 成功）。
+     *
+     * 只有在会话真正建立之后，「断开时发 RTSP TEARDOWN」才有意义：配对/连接阶段
+     * 直接关 socket 不会在接收端留下「已连接」的僵尸会话，多发反而可能被当异常报文。
+     */
+    @Volatile
+    private var sessionEstablished: Boolean = false
+
+    /**
+     * 配对重试期间网络绑定失效时的自动恢复钩子（主控实现为「重新加入车机热点」）。
+     * 返回 true = 网络可用（本来就健康或已重加入成功）。
+     *
+     * 2026-10-29 实车：EMUI 会静默回收无互联网应用专属网络的绑定（onLost 不回调），
+     * 但 `_airplay._tcp` 仍能解析到车机地址——原实现只会对着死绑定空转到窗口耗尽
+     * （ECONNREFUSED → ENONET），用户必须手动「取消连接 → 开始连接」重绑才连得上。
+     */
+    @Volatile
+    var wifiRecovery: (() -> Boolean)? = null
+
+    /** 最近一次收到车机任何字节的时刻（uptimeMillis；0 = 本会话还没收到过）。 */
+    @Volatile
+    private var lastCarByteAtMs: Long = 0L
+
+    /**
+     * 距上一次收到车机字节的毫秒数（0 = 尚未收到）。
+     *
+     * 对应「车机心跳年龄」指标（同类实现对端日志里的 `receiveAgeMs`）：断链时打出来
+     * 就能一眼分辨是「手机根本没把包发出去/被 ROM 掐了网络」（年龄很小但本地发失败）
+     * 还是「车机太久没收到我们的保活、主动拆链」（年龄接近车机看门狗 ~10-20s）。
+     */
+    fun carSilenceMs(): Long {
+        val last = lastCarByteAtMs
+        return if (last == 0L) 0L else SystemClock.uptimeMillis() - last
+    }
+
     /** 当前端点（主控合并晚到端点时用作兜底，避免 0x4301 不带 IP 时把可用地址抹掉）。 */
     val currentEndpoint: Iap2SenderSession.CarPlayEndpoint get() = endpoint
 
@@ -231,6 +267,10 @@ class AirPlayClient(
             }
             close()
             if (!ensureConnected(2_000)) {
+                // 连不上既可能是「车机端口还没开」，也可能是「网络绑定已被系统回收」
+                // （EMUI 无互联网热点静默回收）。后者只会一路 ENONET，必须在每轮
+                // 重试前就地重新加入热点，否则 120s 窗口全部空转。
+                runCatching { wifiRecovery?.invoke() }
                 if (attempt == 1 || attempt % 5 == 0) {
                     log("AIRPLAY: 车机 AirPlay 端口未开（等待你点车机上的手机图标 / 车机发 ctrl 邀请）…第 $attempt 次重试")
                 }
@@ -334,6 +374,7 @@ class AirPlayClient(
         port: Int,
     ) {
         if (port <= 0) return
+        lastCarByteAtMs = SystemClock.uptimeMillis()
         Thread({
             var udp: java.net.DatagramSocket? = null
             try {
@@ -432,6 +473,7 @@ class AirPlayClient(
     fun close() {
         runCatching { socket?.close() }
         socket = null
+        sessionEstablished = false
         activeHost = null
         activeAddress = null
         // 新连接总是从**明文**开始（pair-verify 成功后才切加密）：旧连接的 cipher 必须
@@ -454,6 +496,31 @@ class AirPlayClient(
         // 注意：controlIapTx 不在这里 shutdown——close() 会被同实例的重试路径
         // （retryWithPairing 等）复用，杀掉执行器会废掉重连后的 MIB3 出站；
         // 守护线程常驻的代价可忽略（每客户端实例一根）
+    }
+
+    /**
+     * 干净收尾：会话已建立时先向接收端发 RTSP `TEARDOWN`，再关控制通道。
+     *
+     * 真 iPhone 结束 CarPlay 会话时会先告诉车机会话结束；原实现直接关 socket，
+     * 车机（BMW NBTevo 实车）侧 CarPlay 服务会停留在半初始化状态——用户看到的
+     * 「手动取消连接」很多时候紧接着车机死机重启。
+     *
+     * 仅一次、失败静默忽略：部分接收端对 TEARDOWN 的路径/会话头敏感，被拒绝
+     * （455/404）也不影响后续关闭；超时压到 800ms，避免拖慢断开操作。
+     */
+    fun teardownAndClose(reason: String) {
+        val client = socket
+        if (!sessionEstablished || client == null || client.isClosed) {
+            close()
+            return
+        }
+        runCatching {
+            val (statusLine, _) = request("TEARDOWN", "/", ByteArray(0), timeoutMillis = 800)
+            log("AIRPLAY: TEARDOWN 已发送（$reason）→ [$statusLine]")
+        }.onFailure {
+            log("AIRPLAY: TEARDOWN 未送达（${it.message}）——直接关闭控制通道")
+        }
+        close()
     }
 
     /**
@@ -823,6 +890,8 @@ class AirPlayClient(
                 "display=${info.displayWidth}x${info.displayHeight}@${info.maxFps} " +
                 "displayUuid=${info.displayUuid}",
         )
+        // SETUP 200 = 接收端已建立会话：此后断开要走 TEARDOWN 收尾（见 teardownAndClose）
+        sessionEstablished = true
         return info
     }
 
@@ -2062,6 +2131,7 @@ class AirPlayClient(
                     contentType = "application/x-apple-binary-plist",
                 )
             val ok = statusLine.contains("200")
+            if (ok) sessionEstablished = true
             log(if (ok) "AIRPLAY: ✓ RECORD 完成——会话已激活" else "AIRPLAY: RECORD 应答 [$statusLine]")
             ok
         } catch (error: IOException) {
@@ -2503,6 +2573,7 @@ class AirPlayClient(
             while (true) {
                 val count = input.read(chunk)
                 if (count < 0) break
+                lastCarByteAtMs = SystemClock.uptimeMillis()
                 val encryption = cipher
                 if (encryption != null && !encryptedMode) {
                     // 切换点：清掉明文侧残留，之后一律走帧解密
@@ -2532,7 +2603,8 @@ class AirPlayClient(
                     dispatchResponse(parsed.statusLine, parsed.body, parsed.head)
                 }
             }
-        } catch (_: IOException) {
+        } catch (error: IOException) {
+            log("AIRPLAY: 控制通道读线程结束 - ${error.message}（距上次收到车机字节 ${carSilenceMs()}ms）")
         } finally {
             // 只由「当前」读线程清账：重连会换 socket 与新读线程，旧线程不得误伤新会话
             if (generation == readerGeneration) {

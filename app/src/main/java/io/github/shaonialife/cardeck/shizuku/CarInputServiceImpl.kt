@@ -196,7 +196,15 @@ class CarInputServiceImpl(
         return inject(up, displayId)
     }
 
-    /** 方控按键：KeyEvent 同为 InputEvent，走同一条 injectInputEvent 通道（setDisplayId 隐藏 API 通用）。 */
+    /**
+     * 方控按键：KeyEvent 同为 InputEvent，走同一条 injectInputEvent 通道（setDisplayId 隐藏 API 通用）。
+     *
+     * 模式必须用 **ASYNC(0)**，不能用 WAIT_FOR_FINISH(2)（2026-10-29 实车定谳）：
+     * 媒体键注入的目标是 display 0（手机主屏），事件会进**当前前台窗口**——也就是本 App
+     * 自己。WAIT_FOR_FINISH 要等到该事件被窗口处理完才返回，而调用方恰恰在 App 主线程里
+     * （音乐卡的播放/上一曲/下一曲点击）→ 主线程等注入返回、注入等主线程处理事件 → 互锁；
+     * 输入派发超时后整页 ANR（「App 主页无响应」），此后所有点击与翻页全部失灵。
+     */
     override fun key(
         displayId: Int,
         keyCode: Int,
@@ -210,9 +218,9 @@ class CarInputServiceImpl(
                 setDisplayIdMethod?.invoke(event, displayId)
                 val ok =
                     when {
-                        m.parameterTypes.size == 2 -> m.invoke(inj.receiver, event, 2) as Boolean
-                        m.parameterTypes[2] == java.lang.Long.TYPE -> m.invoke(inj.receiver, event, 2, 0L) as Boolean
-                        else -> m.invoke(inj.receiver, event, 2, displayId) as Boolean
+                        m.parameterTypes.size == 2 -> m.invoke(inj.receiver, event, MODE_ASYNC) as Boolean
+                        m.parameterTypes[2] == java.lang.Long.TYPE -> m.invoke(inj.receiver, event, MODE_ASYNC, 0L) as Boolean
+                        else -> m.invoke(inj.receiver, event, MODE_ASYNC, displayId) as Boolean
                     }
                 ok
             }
@@ -671,5 +679,11 @@ class CarInputServiceImpl(
 
         /** VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH（@hide；AOSP 定义 = 1 << 6 = 0x40）。 */
         private const val FLAG_SUPPORTS_TOUCH = 1 shl 6
+
+        /**
+         * InputManager.INJECT_INPUT_EVENT_MODE_ASYNC。按键注入用它：不等事件派发完成，
+         * 避免「调用方在主线程 → 事件又送回自己」的互锁（见 [key] 的说明）。
+         */
+        private const val MODE_ASYNC = 0
     }
 }

@@ -126,6 +126,12 @@ object SessionController {
      */
     private const val SPECIFIER_JOIN_TIMEOUT_MS = 120_000L
 
+    /** 绑定被系统回收后自动重加入的上限（在配对重试窗口内完成即可）。 */
+    private const val WIFI_RECOVER_TIMEOUT_MS = 20_000L
+
+    /** 自动重加入的最小间隔：避免配对重试每一轮都重新 requestNetwork 扰动车机热点。 */
+    private const val WIFI_RECOVER_COOLDOWN_MS = 6_000L
+
     /** Activity onCreate 时调用：登记 applicationContext 并创建会话对象（幂等）。 */
     fun ensure(context: Context) {
         appContext = context.applicationContext
@@ -165,14 +171,24 @@ object SessionController {
     fun logText(): String = synchronized(logLock) { logBuilder.toString() }
 
     /**
-     * 派发系统媒体键（AudioManager 全局路由给**当前活跃媒体会话**，无需权限）。
-     * 桌面音乐卡的按钮与车机/方向盘媒体键（Consumer HID）共用这一路径。
+     * 派发系统媒体键：**优先经 Shizuku shell 注入**（与方控/旋钮同一通道）。
+     *
+     * `AudioManager.dispatchMediaKeyEvent` 需要 `MEDIA_CONTENT_CONTROL`——第三方 App
+     * 只有是 MediaBrowser/通知监听器才拿得到。EMUI 上它不抛异常、只静默丢弃，
+     * 表现就是「日志里收到了车机媒体键，手机却一点反应没有」（2026-10-29 实车：
+     * 方向盘上一曲/下一曲无效，日志 `usage=0xb5 → keyCode=87` 之后无任何效果）。
+     * shell 注入走真实 InputDispatcher，全局路由到活跃媒体会话，不受该权限限制；
+     * 注入不可用（Shizuku 未就绪）时退回 AudioManager，尽量保留老路径。
+     *
+     * @return true = 已由 Shizuku 注入；false = 退回 AudioManager（可能被 ROM 忽略）
      */
-    fun dispatchMediaKey(keyCode: Int) {
-        val ctx = appContext ?: return
+    fun dispatchMediaKey(keyCode: Int): Boolean {
+        if (CarInputClient.service?.key(0, keyCode) == true) return true
+        val ctx = appContext ?: return false
         val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
         audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
         audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+        return false
     }
 
     /**
@@ -436,6 +452,14 @@ object SessionController {
      */
     @Volatile
     var lastWifiPsk: String? = null
+
+    /** 最近一次 0x5703 的完整热点配置（网络绑定被系统回收时自动重新加入用，仅内存）。 */
+    @Volatile
+    private var lastWifiConfig: Iap2SenderSession.WifiConfiguration? = null
+
+    /** 上一次自动重新加入车机热点的时刻（节流，避免每轮配对重试都重开请求扰动车机）。 */
+    @Volatile
+    private var lastWifiRecoveryAtMs = 0L
 
     /** 挂屏 UI 钩子：SSID 变化时通知当前 Activity 回填输入框（可空）。 */
     @Volatile
@@ -863,7 +887,10 @@ object SessionController {
         TouchRouter
             .reset()
         currentClient?.cancelled = true
-        currentClient?.close()
+        // 会话已建立时先发 RTSP TEARDOWN 再关控制通道：真 iPhone 结束 CarPlay 会先
+        // 通知车机会话结束；硬关 socket 会让车机侧 CarPlay 服务停留在半初始化状态
+        // （「手动取消连接」后车机死机重启的主要嫌疑）。未建立会话时该方法只关 socket。
+        currentClient?.teardownAndClose("会话退役")
         currentClient = null
         // 车机昼夜信号随会话失效：断开后「自动」档退回跟随手机系统
         appContext?.let { ctx ->
@@ -920,11 +947,13 @@ object SessionController {
         // mDNS（DiPlay 视为手机重新上线、再拉一轮 RFCOMM）。只刷新密码缓存。
         if (videoSender?.isRunning == true) {
             lastWifiPsk = wifi.passphrase
+            lastWifiConfig = wifi
             appendLog("0x5703 冗余凭据（会话推流中）——保持现有 WiFi 绑定与 ctrl 广播不变")
             return
         }
         ssidSink?.invoke(wifi.ssid)
         lastWifiPsk = wifi.passphrase
+        lastWifiConfig = wifi
         phaseHint = "拿到车机热点凭据，绑定 WiFi…"
         appendLog(">>> 拿到车机热点凭据（0x5703）——立即绑定 WiFi + 广播 _carplay-ctrl")
         // ctrl 广播已在 startConnection 时发布（catplay：连接前保持发布能力在线）。
@@ -1023,6 +1052,54 @@ object SessionController {
             appendLog("WIFI: 加入车机热点未成功（${result.javaClass.simpleName}）")
         }
         return result
+    }
+
+    /**
+     * 会话期间网络绑定失效时的自动恢复（配对重试循环每轮失败时调用）。
+     *
+     * 2026-10-29 实车根因（日志 18:37:07 → 18:38:12）：会话被车机拆掉后「完整收尾」
+     * 释放了 WiFi，重新加入的绑定又在 ~24s 后被 EMUI 静默回收（onLost 不回调），
+     * 此时 `_airplay._tcp` 仍解析到车机地址——原实现只会对着死绑定空转直到 120s
+     * 配对窗口耗尽（ECONNREFUSED → ENONET），用户只能「取消连接 → 开始连接」手动
+     * 重绑后才连得上。这里就地重新加入热点，让配对重试继续跑，用户无需手动干预。
+     *
+     * 网络健康时只做一次 `getNetworkCapabilities`（零成本），不会扰动现有绑定；
+     * 推流中也不动手（重绑会打断正在跑的 socket）。
+     *
+     * @return true = 网络可用（本来就健康，或已重新加入成功）
+     */
+    private fun recoverCarWifiNetwork(): Boolean {
+        val connector = wifiConnector ?: return false
+        if (connectCancelled) return false
+        if (videoSender?.isRunning == true) return true
+        if (connector.ensureNetworkAlive()) return true
+        val wifi = lastWifiConfig ?: return false
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastWifiRecoveryAtMs < WIFI_RECOVER_COOLDOWN_MS) return false
+        lastWifiRecoveryAtMs = now
+        boundCarSsid = null
+        phaseHint = "车机热点绑定被系统回收——自动重新加入…"
+        appendLog("WIFI: 绑定网络已被系统回收——自动重新加入 \"${wifi.ssid}\"（无需手动取消/重连）")
+        val result =
+            synchronized(wifiBindLock) {
+                connector.joinCarPlayNetwork(
+                    ssid = wifi.ssid,
+                    passphrase = wifi.passphrase,
+                    securityType = wifi.securityType,
+                    timeoutMillis = WIFI_RECOVER_TIMEOUT_MS,
+                    isCancelled = { connectCancelled },
+                )
+            }
+        return if (result is WifiCarPlayConnector.JoinResult.Joined) {
+            boundCarSsid = wifi.ssid
+            phaseHint = "已重新加入车机热点，继续重试配对…"
+            ctrlAdvertiser?.ensureForNetwork(wifi.ssid, force = true, network = connector.currentNetwork)
+            appendLog("WIFI: ✓ 已自动重新加入车机热点 \"${wifi.ssid}\"，继续重试配对")
+            true
+        } else {
+            appendLog("WIFI: 自动重新加入车机热点失败（${result.javaClass.simpleName}）")
+            false
+        }
     }
 
     /**
@@ -2112,11 +2189,17 @@ object SessionController {
                                 )
                             },
                         ).also { created ->
+                            // 配对重试期间网络绑定被系统回收时就地重新加入车机热点，
+                            // 避免对着死绑定空转到窗口耗尽（详见 recoverCarWifiNetwork）。
+                            created.wifiRecovery = { recoverCarWifiNetwork() }
                             // 车机媒体键（iAP2 0x6802 通路）：方向盘/面板的上一曲、下一曲。
                             // 放在这里而不是调用点，保证重连重建 client 时也挂得上。
                             created.onMediaKey = { keyCode ->
-                                dispatchMediaKey(keyCode)
-                                appendLog("EVENT: 车机媒体键（iAP2 0x6802）→ keyCode=$keyCode 已注入")
+                                val injected = dispatchMediaKey(keyCode)
+                                appendLog(
+                                    "EVENT: 车机媒体键（iAP2 0x6802）→ keyCode=$keyCode " +
+                                        if (injected) "已注入(shell)" else "已派发(AudioManager，可能被 ROM 忽略)",
+                                )
                             }
                         }
                     retireSession()
@@ -2273,11 +2356,17 @@ object SessionController {
                                             pressedUsages.forEach { consumerUsage ->
                                                 val keyCode = ConsumerKeys.keyCodeFor(consumerUsage)
                                                 if (keyCode != 0) {
-                                                    dispatchMediaKey(keyCode)
+                                                    val injected = dispatchMediaKey(keyCode)
                                                     appendLog(
-                                                        "EVENT: 车机媒体键 ${ConsumerKeys.nameOf(consumerUsage)}" +
-                                                            "（uuid=$uuid usage=0x%02x → keyCode=$keyCode）"
-                                                                .format(consumerUsage),
+                                                        (
+                                                            "EVENT: 车机媒体键 ${ConsumerKeys.nameOf(consumerUsage)}" +
+                                                                "（uuid=$uuid usage=0x%02x → keyCode=$keyCode）" +
+                                                                if (injected) {
+                                                                    "已注入(shell)"
+                                                                } else {
+                                                                    "已派发(AudioManager，可能被 ROM 忽略)"
+                                                                }
+                                                        ).format(consumerUsage),
                                                     )
                                                 } else {
                                                     appendLog(

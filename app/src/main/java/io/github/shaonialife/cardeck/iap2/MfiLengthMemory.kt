@@ -115,6 +115,22 @@ object MfiLengthMemory {
         }
 
     /**
+     * 该车机**从未对任何基线档位给出应答**（全部静默或被拒，且没有成功记录）。
+     *
+     * 这类接收端的 MFi 校验已被绕过/关闭，对它连发不同长度的随机挑战只会让对端
+     * 拆链（BMW NBTevo 实车曾出现挑战期间直接断开 iAP2 链路）。命中时应跳过
+     * 0xAA02，直接 0xAA05 自报成功。
+     */
+    fun neverAnswered(
+        entry: Entry,
+        baseline: List<Int>,
+    ): Boolean {
+        if (entry.succeeded != null) return false
+        if (baseline.isEmpty()) return false
+        return baseline.all { it in entry.silent || it in entry.rejected }
+    }
+
+    /**
      * 计算本轮的尝试顺序（纯函数）。
      *
      * @param baseline 调用方按接收端类型给出的基线顺序（长度列表）。

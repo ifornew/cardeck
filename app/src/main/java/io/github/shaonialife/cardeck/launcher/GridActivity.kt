@@ -535,11 +535,23 @@ class GridActivity : AppCompatActivity() {
         return target.coerceIn(1, last.coerceAtLeast(1))
     }
 
-    /** 音乐控制：系统媒体键（AudioManager 全局路由给活跃媒体会话，无需权限）。 */
+    /**
+     * 音乐控制：与车机/方向盘媒体键同一条路径（见 [SessionController.dispatchMediaKey]）。
+     * 优先 Shizuku shell 注入——EMUI 上第三方 App 的
+     * `AudioManager.dispatchMediaKeyEvent` 因缺 `MEDIA_CONTENT_CONTROL` 被静默丢弃。
+     *
+     * 必须放到后台线程执行：注入是跨进程 binder 调用，服务侧还要走 InputManager；
+     * 一旦服务侧卡住（或注入目标就是本 App 的前台窗口），在主线程同步等待会直接
+     * ANR，表现为「点一次音乐卡后整页卡死、翻页失灵」。
+     */
     private fun dispatchMediaKey(keyCode: Int) {
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-        audioManager.dispatchMediaKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, keyCode))
-        audioManager.dispatchMediaKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, keyCode))
+        val ctx = applicationContext
+        io.github.shaonialife.cardeck.util.Bg.run("media-key") {
+            if (io.github.shaonialife.cardeck.shizuku.CarInputClient.service?.key(0, keyCode) == true) return@run
+            val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+            audioManager.dispatchMediaKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, keyCode))
+            audioManager.dispatchMediaKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, keyCode))
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
